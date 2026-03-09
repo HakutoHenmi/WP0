@@ -2,6 +2,7 @@
 #include <cassert>
 #include <d3dx12.h>
 #include <filesystem>
+#include "SrvManager.h" // ★追加
 
 #pragma comment(lib, "DirectXTex.lib")
 
@@ -109,18 +110,13 @@ TextureHandle TextureManager::Load(const std::wstring& relPath) {
 	auto bar = CD3DX12_RESOURCE_BARRIER::Transition(tex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	cmd->ResourceBarrier(1, &bar);
 
-	// SRVスロット確保（WindowDX の SRV ヒープを直使用）
-	const int srvIndex = srvCursor_++;
+	// SRVスロット確保（SrvManager を使用）
+	const uint32_t srvIndex = Engine::SrvManager::GetInstance()->AllocateSrvIndex();
 
-	D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-	sv.Format = meta.format;
-	sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-	sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	sv.Texture2D.MipLevels = 1;
+	Engine::SrvManager::GetInstance()->CreateSRVForTexture2D(srvIndex, tex.Get(), meta.format, 1);
 
-	D3D12_CPU_DESCRIPTOR_HANDLE cpu = dx_->SRV_CPU(srvIndex);
-	D3D12_GPU_DESCRIPTOR_HANDLE gpu = dx_->SRV_GPU(srvIndex);
-	dev->CreateShaderResourceView(tex.Get(), &sv, cpu);
+	D3D12_CPU_DESCRIPTOR_HANDLE cpu = Engine::SrvManager::GetInstance()->GetCPUDescriptorHandle(srvIndex);
+	D3D12_GPU_DESCRIPTOR_HANDLE gpu = Engine::SrvManager::GetInstance()->GetGPUDescriptorHandle(srvIndex);
 
 	// 登録
 	TexData td;

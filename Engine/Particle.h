@@ -43,7 +43,7 @@ public:
 	    bool useBillboard = true);
 
 	void Update(float dt);
-	void Draw(const Camera& cam);
+	void Draw(const Camera& cam) { Draw(cam, "Particle"); }
 	void Draw(const Camera& cam, const std::string& shaderName, bool useUvAnim = false, 
 			  int uvCols = 1, int uvRows = 1, float uvFps = 10.0f);
 	
@@ -56,6 +56,14 @@ public:
 			  const Vector4& startColor, const Vector4& endColor, 
 			  float life, const Vector3& angVel = {0, 0, 0}, float damping = 0.0f);
 
+
+	// インスタンスデータ送信用構造体
+	struct ParticleInstanceData {
+		Matrix4x4 world;
+		Vector4 color;
+		Vector4 uvScaleOffset;
+	};
+
 private:
 	Renderer* renderer_ = nullptr;
 
@@ -66,6 +74,11 @@ private:
 
 	// ★追加: ビルボードを使用するかどうか
 	bool useBillboard_ = true;
+
+	// ★追加: 独自のインスタンシングバッファ
+	Microsoft::WRL::ComPtr<ID3D12Resource> instancingBuffer_;
+	uint32_t srvIndex_ = 0;
+	uint32_t maxCount_ = 0;
 };
 
 } // namespace Engine

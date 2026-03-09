@@ -143,6 +143,8 @@
     <ClCompile Include="Engine\ParticleEditor.cpp" />
     <ClCompile Include="Engine\Renderer.cpp" />
     <ClCompile Include="Engine\SceneManager.cpp" />
+    <ClCompile Include="Engine\ParticleManager.cpp" />
+    <ClCompile Include="Engine\SrvManager.cpp" />
     <ClCompile Include="Engine\TextureManager.cpp" />
     <ClCompile Include="Engine\Water\WaterSurface.cpp" />
     <ClCompile Include="Engine\WindowDX.cpp" />
@@ -181,6 +183,8 @@
     <ClInclude Include="Engine\ParticleEditor.h" />
     <ClInclude Include="Engine\Renderer.h" />
     <ClInclude Include="Engine\SceneManager.h" />
+    <ClInclude Include="Engine\ParticleManager.h" />
+    <ClInclude Include="Engine\SrvManager.h" />
     <ClInclude Include="Engine\TextureManager.h" />
     <ClInclude Include="Engine\Transform.h" />
     <ClInclude Include="Engine\Water\WaterSurface.h" />

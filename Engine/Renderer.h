@@ -134,6 +134,7 @@ public:
 	void Shutdown();
 
 	static Renderer* GetInstance() { return instance_; }
+	ID3D12Device* GetDevice() const { return dev_; }
 
 	void BeginFrame(const float clearColorRGBA[4]);
 	void EndFrame();
@@ -194,8 +195,8 @@ public:
 
 	// ★追加: テクスチャのSRVハンドルを取得 (ImGui::Imageでサムネイル表示用)
 	D3D12_GPU_DESCRIPTOR_HANDLE GetTextureSrvGpu(TextureHandle handle) const {
-		if (handle < textures_.size()) return textures_[handle].srvGpu;
-		return D3D12_GPU_DESCRIPTOR_HANDLE{0};
+		if (!this || handle >= textures_.size()) return D3D12_GPU_DESCRIPTOR_HANDLE{0};
+		return textures_[handle].srvGpu;
 	}
 
 	// 通常メッシュ描画
@@ -212,6 +213,9 @@ public:
 	void DrawParticle(MeshHandle mesh, TextureHandle texture, const Transform& transform, 
 					  const Vector4& mulColor, const Vector4& uvScaleOffset, 
 					  const std::string& shaderName = "Particle");
+
+	// ★追加: パーティクルのバッチ描画 (ParticleSystem 自身が持つStructuredBufferとSRVを利用する)
+	void DrawParticleGroup(MeshHandle mesh, TextureHandle texture, ID3D12Resource* instancingBuffer, uint32_t srvIndex, uint32_t instanceCount, const std::string& shaderName = "ParticleInstanced");
 
 	// ★スキニングメッシュ描画
 	void DrawSkinnedMesh(MeshHandle mesh, TextureHandle texture, const Transform& transform, const std::vector<Matrix4x4>& bones, const Vector4& mulColor = {1, 1, 1, 1});
@@ -297,6 +301,15 @@ private:
 		std::vector<InstanceData> instances;
 	};
 
+	struct ParticleGroupDrawCall {
+		MeshHandle mesh;
+		TextureHandle tex;
+		ID3D12Resource* instancingBuffer; // ★追加：GPU Virtual Address 取得用
+		uint32_t srvIndex;
+		uint32_t instanceCount;
+		std::string shaderName;
+	};
+
 private:
 	struct Texture {
 		Microsoft::WRL::ComPtr<ID3D12Resource> res;
@@ -335,14 +348,6 @@ private:
 	ID3D12Device* dev_ = nullptr;
 	ID3D12GraphicsCommandList* list_ = nullptr;
 	ID3D12CommandQueue* queue_ = nullptr;
-
-	ID3D12DescriptorHeap* srvHeap_ = nullptr;
-	uint32_t srvInc_ = 0;
-
-	uint32_t srvCursor_ = 10;
-	uint32_t srvDynamicCursor_ = 0;
-	static constexpr uint32_t kSrvStaticMax = 1000;
-	static constexpr uint32_t kSrvHeapTotal = 2048;
 	
 	// ★追加: RTV割り当て用
 	uint32_t rtvCursor_ = WindowDX::kBackBufferCount; // スワップチェーンの分をスキップ
@@ -444,6 +449,7 @@ private:
 	std::vector<DrawCall> drawCalls_; // ★追加: ドローコールバッファ
 	std::vector<InstancedDrawCall> instancedDrawCalls_; // ★追加: インスタンスドローコール
 	std::vector<InstancedDrawCall> instancedParticleDrawCalls_; // ★追加: パーティクル用
+	std::vector<ParticleGroupDrawCall> particleGroupDrawCalls_; // ★追加: バッチパーティクル用
 	std::vector<SpriteDrawCall> spriteDrawCalls_; // ★追加: スプライト用
 
 	// ★変更: Mesh構造体ではなくModelクラスへのスマートポインタで管理

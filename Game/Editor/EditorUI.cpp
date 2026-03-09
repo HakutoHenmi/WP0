@@ -3680,16 +3680,17 @@ void EditorUI::ShowProject(Engine::Renderer* renderer, GameScene* scene) {
 		} else if (isTexture) {
 			// テクスチャ: サムネイルプレビュー
 			Engine::Renderer::TextureHandle th = 0;
-			auto it = thumbnailCache.find(pe.path);
-			if (it != thumbnailCache.end()) {
-				th = it->second;
-			} else {
-				// std::replace for path separators
-				std::string loadPath = pe.path;
-				th = renderer->LoadTexture2D(loadPath);
-				thumbnailCache[pe.path] = th;
+			if (renderer) {
+				auto it = thumbnailCache.find(pe.path);
+				if (it != thumbnailCache.end()) {
+					th = it->second;
+				} else {
+					std::string loadPath = pe.path;
+					th = renderer->LoadTexture2D(loadPath);
+					thumbnailCache[pe.path] = th;
+				}
 			}
-			auto srv = renderer->GetTextureSrvGpu(th);
+			auto srv = renderer ? renderer->GetTextureSrvGpu(th) : D3D12_GPU_DESCRIPTOR_HANDLE{0};
 			if (srv.ptr != 0) {
 				ImGui::Image((ImTextureID)srv.ptr, ImVec2(iconSize, iconSize));
 			} else {
