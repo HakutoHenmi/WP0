@@ -56,18 +56,30 @@ void Audio::Shutdown() {
 	instance_ = nullptr;
 }
 
-// std::string 版 Load
+// ====================================================
+// Media Foundationを用いた音声ファイル読み込み
+// 対応フォーマット: WAV, MP3, AAC, WMA, FLAC 等
+// IMFSourceReaderを使用し、圧縮音声をPCMにデコードして読み込む
+// ====================================================
 uint32_t Audio::Load(const std::string& path) {
 	// ワイド文字に変換
 	int size_needed = MultiByteToWideChar(CP_UTF8, 0, &path[0], (int)path.size(), NULL, 0);
 	std::wstring wpath(size_needed, 0);
 	MultiByteToWideChar(CP_UTF8, 0, &path[0], (int)path.size(), &wpath[0], size_needed);
 
+	// デバッグログ: 読み込み対象ファイルと拡張子を表示
+	std::string ext = "";
+	auto dotPos = path.rfind('.');
+	if (dotPos != std::string::npos) ext = path.substr(dotPos);
+	OutputDebugStringA(("[Audio::Load] Loading: " + path + " (format: " + ext + ")\n").c_str());
+
 	SoundData newSound = {};
 	if (LoadViaMF(wpath, newSound)) {
+		OutputDebugStringA(("[Audio::Load] Successfully decoded via Media Foundation: " + path + "\n").c_str());
 		soundDatas_.push_back(newSound);
 		return (uint32_t)(soundDatas_.size() - 1);
 	}
+	OutputDebugStringA(("[Audio::Load] FAILED to load: " + path + "\n").c_str());
 	return 0xFFFFFFFF; // エラー
 }
 
@@ -154,14 +166,21 @@ void Audio::GarbageCollect() {
 	}
 }
 
-// MediaFoundationを使ったロード実装
+// ====================================================
+// Media Foundationを使用した音声デコード処理
+// 圧縮フォーマット(MP3, AAC, WMA, FLAC等)を
+// IMFSourceReaderを通じてPCMにデコードし、XAudio2で再生可能な形式に変換する
+// ====================================================
 bool Audio::LoadViaMF(const std::wstring& path, SoundData& outData) {
 	HRESULT hr;
+
+	// IMFSourceReaderを作成 — 対応する全ての音声フォーマットを自動でデコード
 	Microsoft::WRL::ComPtr<IMFSourceReader> reader;
 	hr = MFCreateSourceReaderFromURL(path.c_str(), nullptr, &reader);
 	if (FAILED(hr))
 		return false;
 
+	// オーディオストリームのみ選択
 	hr = reader->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
 	if (FAILED(hr))
 		return false;
@@ -169,14 +188,17 @@ bool Audio::LoadViaMF(const std::wstring& path, SoundData& outData) {
 	if (FAILED(hr))
 		return false;
 
+	// 出力メディアタイプを非圧縮PCMに設定
+	// これによりMP3/AAC等の圧縮データが自動的にPCMにデコードされる
 	Microsoft::WRL::ComPtr<IMFMediaType> mediaType;
 	MFCreateMediaType(&mediaType);
 	mediaType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-	mediaType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+	mediaType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);  // PCMへデコード指定
 	hr = reader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, mediaType.Get());
 	if (FAILED(hr))
 		return false;
 
+	// デコード後の実際のWAVEFORMATEXを取得
 	Microsoft::WRL::ComPtr<IMFMediaType> outputMediaType;
 	reader->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, &outputMediaType);
 
@@ -188,6 +210,7 @@ bool Audio::LoadViaMF(const std::wstring& path, SoundData& outData) {
 		CoTaskMemFree(pWfx);
 	}
 
+	// PCMデータをサンプル単位で読み出し、バッファに蓄積
 	while (true) {
 		Microsoft::WRL::ComPtr<IMFSample> sample;
 		DWORD flags = 0;
