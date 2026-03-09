@@ -53,6 +53,10 @@ private:
     // パーティクルエディター
     Engine::ParticleEditor particleEditor_;
 
+    // ★追加: スプライトデバッグ用
+    uint32_t spriteTexHandle_ = 0;
+    float spritePos_[2] = {200.0f, 200.0f};
+
     friend class EditorUI;
     friend class PipeEditor;
 };

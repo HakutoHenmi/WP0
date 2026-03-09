@@ -68,6 +68,9 @@ void GameScene::Initialize(Engine::WindowDX* dx) {
 	// パーティクルエディターの初期化
 	particleEditor_.Initialize();
 
+	// ★追加: スプライトデバッグ用テクスチャのロード
+	spriteTexHandle_ = renderer_->LoadTexture2D("Resources/white1x1.png");
+
 	// スクリプトエンジンの初期化
 	ScriptEngine::GetInstance()->Initialize();
 
@@ -476,6 +479,17 @@ void GameScene::Draw() {
 	for (auto& system : systems_) {
 		system->Draw(objects_, ctx_);
 	}
+
+	// ★追加: スプライト描画（ImGui::SliderFloat2で位置を操作）
+	if (spriteTexHandle_ != 0) {
+		Engine::Renderer::SpriteDesc sd;
+		sd.x = spritePos_[0];
+		sd.y = spritePos_[1];
+		sd.w = 128.0f;
+		sd.h = 128.0f;
+		sd.color = {1.0f, 1.0f, 1.0f, 1.0f};
+		renderer_->DrawSprite(spriteTexHandle_, sd);
+	}
 }
 
 extern GizmoMode currentGizmoMode;
@@ -708,6 +722,12 @@ void GameScene::DrawEditor() {
 #ifdef USE_IMGUI
 	EditorUI::Show(renderer_, this);
 	particleEditor_.DrawUI();
+
+	// ★追加: スプライトデバッグウィンドウ
+	ImGui::Begin("Sprite Debug");
+	ImGui::SliderFloat2("Position", spritePos_, 0.0f, 1280.0f);
+	ImGui::Text("X: %.1f  Y: %.1f", spritePos_[0], spritePos_[1]);
+	ImGui::End();
 #endif
 }
 
