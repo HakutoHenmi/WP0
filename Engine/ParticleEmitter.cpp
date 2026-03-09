@@ -1,4 +1,5 @@
 #include "ParticleEmitter.h"
+#include "ParticleManager.h"
 #include <fstream>
 #include <cstdlib>
 
@@ -26,7 +27,6 @@ void ParticleEmitter::Initialize(Renderer& renderer, const std::string& name) {
 
 void ParticleEmitter::ApplySystemSettings() {
 	if (!renderer_) return;
-	particleSystem_.Initialize(*renderer_, 1000, "Resources/plane.obj", params.texturePath, true, params.useBillboard);
 	currentTexturePath_ = params.texturePath;
 	currentBillboard_ = params.useBillboard;
 }
@@ -45,21 +45,12 @@ void ParticleEmitter::Update(float dt) {
 			EmitBurst(1);
 		}
 	}
-
-	particleSystem_.Update(dt);
 }
 
 void ParticleEmitter::Draw(const Camera& cam) {
-	std::string shaderName = params.shaderName;
-	if (shaderName.empty()) {
-		shaderName = params.isAdditive ? "ParticleAdditive" : "Particle";
-	}
-
-	particleSystem_.Draw(cam, shaderName,
-						 params.useUvAnim,
-						 params.uvAnimCols,
-						 params.uvAnimRows,
-						 params.uvAnimFps);
+	(void)cam;
+	// ParticleManagerがまとめて描画するので、ここでは個別にDrawを呼ぶ必要はない
+	// 必要に応じて個別のエミッター固有の設定を管理する
 }
 
 void ParticleEmitter::EmitBurst(int count) {
@@ -113,7 +104,8 @@ void ParticleEmitter::EmitBurst(int count) {
 
 		Vector3 angVel = RandomVector3(params.angularVelocity, params.angularVelocityVariance);
 
-		particleSystem_.Emit(
+		ParticleManager::GetInstance()->Emit(
+			params.texturePath,
 			startPos,
 			startVel,
 			params.acceleration,

@@ -92,7 +92,6 @@ public:
 	bool isPlaying = true;
 	
 private:
-	ParticleSystem particleSystem_;
 	Renderer* renderer_ = nullptr;
 	float emitTimer_ = 0.0f;
 	std::string currentTexturePath_;

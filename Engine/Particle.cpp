@@ -3,6 +3,9 @@
 #include <cmath>
 #include <cstdlib> // rand用
 
+#include "SrvManager.h"
+#include "d3dx12.h"
+
 namespace Engine {
 
 void ParticleSystem::Initialize(Renderer& renderer, size_t maxCount, const std::string& meshPath, const std::string& texturePath, bool sRGB, bool useBillboard) {
@@ -15,6 +18,18 @@ void ParticleSystem::Initialize(Renderer& renderer, size_t maxCount, const std::
 	// 新Renderer: メッシュとテクスチャをハンドルで持つ
 	mesh_ = renderer_->LoadObjMesh(meshPath);
 	tex_ = renderer_->LoadTexture2D(texturePath, sRGB);
+	maxCount_ = static_cast<uint32_t>(maxCount);
+
+	// インスタンシング用バッファの作成
+	if (renderer_->GetDevice()) {
+		CD3DX12_HEAP_PROPERTIES hp(D3D12_HEAP_TYPE_UPLOAD);
+		CD3DX12_RESOURCE_DESC rd = CD3DX12_RESOURCE_DESC::Buffer(sizeof(ParticleInstanceData) * maxCount_);
+		renderer_->GetDevice()->CreateCommittedResource(
+			&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&instancingBuffer_));
+		
+		srvIndex_ = Engine::SrvManager::GetInstance()->AllocateSrvIndex();
+		Engine::SrvManager::GetInstance()->CreateSRVForStructuredBuffer(srvIndex_, instancingBuffer_.Get(), (UINT)maxCount_, sizeof(ParticleInstanceData));
+	}
 
 	// ※ mesh_ / tex_ が 0 の場合、Draw() が何も描かずにreturnするのでクラッシュしません
 }
@@ -111,9 +126,20 @@ void ParticleSystem::Draw(const Camera& cam, const std::string& shaderName, bool
 	const auto cp = cam.Position();
 	const Vector3 camPos{cp.x, cp.y, cp.z};
 
+	// インスタンスデータをバッファに書き込む
+	ParticleInstanceData* mappedData = nullptr;
+	if (FAILED(instancingBuffer_->Map(0, nullptr, reinterpret_cast<void**>(&mappedData)))) {
+		return;
+	}
+
+	uint32_t instanceCount = 0;
+
 	for (auto& p : particles_) {
 		if (!p.active)
 			continue;
+		
+		if (instanceCount >= maxCount_)
+			break;
 
 		Transform tf;
 		tf.translate = p.pos;
@@ -137,7 +163,7 @@ void ParticleSystem::Draw(const Camera& cam, const std::string& shaderName, bool
 			const float roll = 0.0f;
 			tf.rotate = {pitch, yaw, roll};
 		} else {
-			// ★追加: 自由回転（紙吹雪など）
+			// 自由回転（紙吹雪など）
 			tf.rotate = p.rotation;
 		}
 
@@ -156,8 +182,19 @@ void ParticleSystem::Draw(const Camera& cam, const std::string& shaderName, bool
 			uvScaleOffset.w = rowIdx * uvScaleOffset.y; // Offset V
 		}
 
-		// ★GPUインスタンシングを使用して描画予約
-		renderer_->DrawParticleInstanced(mesh_, tex_, tf, p.color, uvScaleOffset, shaderName);
+		// バックバッファへデータをコピー
+		mappedData[instanceCount].world = tf.ToMatrix();
+		mappedData[instanceCount].color = p.color;
+		mappedData[instanceCount].uvScaleOffset = uvScaleOffset;
+		
+		instanceCount++;
+	}
+
+	instancingBuffer_->Unmap(0, nullptr);
+
+	if (instanceCount > 0) {
+		// ★GPUインスタンシングを使用して一括描画予約 (ParticleGroupDrawCall を利用)
+		renderer_->DrawParticleGroup(mesh_, tex_, instancingBuffer_.Get(), srvIndex_, instanceCount, shaderName);
 	}
 }
 

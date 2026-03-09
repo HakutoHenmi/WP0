@@ -1,6 +1,7 @@
 // Engine/Renderer.cpp
 #include "Renderer.h"
 #include "Model.h"
+#include "SrvManager.h"
 
 #include <algorithm>
 #include <cassert>
@@ -57,13 +58,11 @@ bool Renderer::Initialize(WindowDX* window) {
 	dev_ = window_->Dev();
 	list_ = window_->List();
 	queue_ = window_->Queue();
-	srvHeap_ = window_->SRV();
-	srvInc_ = window_->SrvInc();
 
-	if (!dev_ || !list_ || !queue_ || !srvHeap_)
+	if (!dev_ || !list_ || !queue_)
 		return false;
 
-	srvDynamicCursor_ = kSrvStaticMax;
+	SrvManager::GetInstance()->Initialize(dev_);
 
 	viewport_.TopLeftX = 0.0f;
 	viewport_.TopLeftY = 0.0f;
@@ -121,15 +120,10 @@ bool Renderer::Initialize(WindowDX* window) {
 
 		// 6. SRV作成
 		const uint32_t srvIdx = AllocateSrvIndex();
-		t.srvCpu = window_->SRV_CPU((int)srvIdx);
-		t.srvGpu = window_->SRV_GPU((int)srvIdx);
-
-		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-		srvDesc.Format = texDesc.Format;
-		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-		srvDesc.Texture2D.MipLevels = 1;
-		dev_->CreateShaderResourceView(t.res.Get(), &srvDesc, t.srvCpu);
+		SrvManager::GetInstance()->CreateSRVForTexture2D(srvIdx, t.res.Get(), texDesc.Format, 1);
+		
+		t.srvCpu = SrvManager::GetInstance()->GetCPUDescriptorHandle(srvIdx);
+		t.srvGpu = SrvManager::GetInstance()->GetGPUDescriptorHandle(srvIdx);
 
 		// textures_[0] として登録
 		textures_.push_back(t);
@@ -185,14 +179,9 @@ bool Renderer::Initialize(WindowDX* window) {
 		shadowDsv_ = shadowDsvHeap_->GetCPUDescriptorHandleForHeapStart();
 		dev_->CreateDepthStencilView(shadowMap_.Get(), &dsvDesc, shadowDsv_);
 
-		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-		srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
-		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-		srvDesc.Texture2D.MipLevels = 1;
-		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		const uint32_t sIdx = AllocateSrvIndex();
-		dev_->CreateShaderResourceView(shadowMap_.Get(), &srvDesc, window_->SRV_CPU((int)sIdx));
-		shadowSrv_ = window_->SRV_GPU((int)sIdx);
+		SrvManager::GetInstance()->CreateSRVForTexture2D(sIdx, shadowMap_.Get(), DXGI_FORMAT_R32_FLOAT, 1);
+		shadowSrv_ = SrvManager::GetInstance()->GetGPUDescriptorHandle(sIdx);
 	}
 
 	if (!InitPipelines())
@@ -259,9 +248,6 @@ void Renderer::Shutdown() {
 	dev_ = nullptr;
 	list_ = nullptr;
 	queue_ = nullptr;
-	srvHeap_ = nullptr;
-	srvInc_ = 0;
-	srvCursor_ = 10;
 
 	cbFrameAddr_ = 0;
 	cbLightAddr_ = 0;
@@ -273,7 +259,7 @@ void Renderer::WaitGPU() {
 }
 
 void Renderer::BeginFrame(const float clearColorRGBA[4]) {
-	ID3D12DescriptorHeap* heaps[] = {srvHeap_};
+	ID3D12DescriptorHeap* heaps[] = {SrvManager::GetInstance()->GetDescriptorHeap()};
 	list_->SetDescriptorHeaps(1, heaps);
 
 	const uint32_t fi = window_->FrameIndex();
@@ -286,7 +272,7 @@ void Renderer::BeginFrame(const float clearColorRGBA[4]) {
 	// インスタンス描画用のキューをクリア
 	instancedDrawCalls_.clear();
 	instancedParticleDrawCalls_.clear();
-	srvDynamicCursor_ = kSrvStaticMax; // 動的SRVカーソルをリセット
+	SrvManager::GetInstance()->ResetDynamicCursor(); // 動的SRVカーソルをリセット
 	spriteDrawCalls_.clear(); // ★スプライトもクリア
 
 	cbFrameAddr_ = 0;
@@ -412,8 +398,9 @@ void Renderer::FlushDrawCalls() {
 			// t0-t5: Descriptor Table
 			uint32_t sIdx = AllocateDynamicSrvIndex(6);
 			if (sIdx != UINT32_MAX) {
-				D3D12_CPU_DESCRIPTOR_HANDLE dest = window_->SRV_CPU((int)sIdx);
-				D3D12_GPU_DESCRIPTOR_HANDLE destGpu = window_->SRV_GPU((int)sIdx);
+				D3D12_CPU_DESCRIPTOR_HANDLE dest = SrvManager::GetInstance()->GetCPUDescriptorHandle(sIdx);
+				D3D12_GPU_DESCRIPTOR_HANDLE destGpu = SrvManager::GetInstance()->GetGPUDescriptorHandle(sIdx);
+				uint32_t srvInc = SrvManager::GetInstance()->GetDescriptorSize();
 				for (int i = 0; i < 6; ++i) {
 					Texture* texObj = &textures_[0];
 					if (i == 0 && dc.tex < textures_.size()) texObj = &textures_[dc.tex];
@@ -429,7 +416,7 @@ void Renderer::FlushDrawCalls() {
 						srvDesc.Texture2D.MipLevels = resDesc.MipLevels > 0 ? resDesc.MipLevels : 1;
 						dev_->CreateShaderResourceView(texObj->res.Get(), &srvDesc, dest);
 					}
-					dest.ptr += srvInc_;
+					dest.ptr += srvInc;
 				}
 				list_->SetGraphicsRootDescriptorTable(3, destGpu);
 			}
@@ -547,8 +534,7 @@ void Renderer::FlushDrawCalls() {
 					// テクスチャバインド
 					uint32_t sIdx = AllocateDynamicSrvIndex(6);
 					if (sIdx != UINT32_MAX) {
-						D3D12_CPU_DESCRIPTOR_HANDLE dest = window_->SRV_CPU((int)sIdx);
-						D3D12_GPU_DESCRIPTOR_HANDLE destGpu = window_->SRV_GPU((int)sIdx);
+						D3D12_GPU_DESCRIPTOR_HANDLE destGpu = SrvManager::GetInstance()->GetGPUDescriptorHandle(sIdx);
 						for (int i = 0; i < 6; ++i) {
 							Texture* texObj = &textures_[0];
 							if (i == 0 && idc.tex < textures_.size()) texObj = &textures_[idc.tex];
@@ -557,14 +543,9 @@ void Renderer::FlushDrawCalls() {
 
 							if (texObj->res) {
 								D3D12_RESOURCE_DESC resDesc = texObj->res->GetDesc();
-								D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-								srvDesc.Format = resDesc.Format;
-								srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-								srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-								srvDesc.Texture2D.MipLevels = resDesc.MipLevels > 0 ? resDesc.MipLevels : 1;
-								dev_->CreateShaderResourceView(texObj->res.Get(), &srvDesc, dest);
+								UINT mipLevels = resDesc.MipLevels > 0 ? resDesc.MipLevels : 1;
+								SrvManager::GetInstance()->CreateSRVForTexture2D(sIdx + i, texObj->res.Get(), resDesc.Format, mipLevels);
 							}
-							dest.ptr += srvInc_;
 						}
 						list_->SetGraphicsRootDescriptorTable(3, destGpu);
 					}
@@ -598,8 +579,65 @@ void Renderer::FlushDrawCalls() {
 	// パーティクルのインスタンス描画
 	flushInstanced(instancedParticleDrawCalls_, "ParticleInstanced");
 
+	// ====== バッチパーティクルの描画処理 ======
+	if (!particleGroupDrawCalls_.empty()) {
+		for (auto& dc : particleGroupDrawCalls_) {
+			auto* model = GetModel(dc.mesh);
+			if (!model || dc.instanceCount == 0) continue;
+
+			std::string sName = dc.shaderName;
+			if (sName == "Particle" || sName == "Default") {
+				sName = "ParticleInstanced";
+			} else if (sName == "ParticleAdditive") {
+				sName = "ParticleAdditiveInstanced";
+			}
+
+			if (pipelines_.count(sName)) {
+				list_->SetPipelineState(pipelines_[sName].Get());
+			} else if (pipelines_.count("ParticleInstanced")) {
+				list_->SetPipelineState(pipelines_["ParticleInstanced"].Get());
+			} else {
+				continue;
+			}
+
+			list_->SetGraphicsRootSignature(rootSig3D_.Get());
+			list_->SetGraphicsRootConstantBufferView(0, cbFrameAddr_);
+			list_->SetGraphicsRootConstantBufferView(2, cbLightAddr_);
+			if (shadowSrv_.ptr != 0) {
+				list_->SetGraphicsRootDescriptorTable(5, shadowSrv_);
+			}
+
+			// テクスチャ設定
+			if (dc.tex != 0 && dc.tex < textures_.size()) {
+				list_->SetGraphicsRootDescriptorTable(3, textures_[dc.tex].srvGpu);
+			} else {
+				list_->SetGraphicsRootDescriptorTable(3, textures_[0].srvGpu);
+			}
+
+			// インスタンスデータとして外部から渡されたバッファのGPU仮想アドレスをSlot 6にバインド
+			if (dc.instancingBuffer) {
+				list_->SetGraphicsRootShaderResourceView(6, dc.instancingBuffer->GetGPUVirtualAddress());
+			}
+
+			// 描画実行
+			model->DrawInstanced(list_, dc.instanceCount);
+		}
+	}
+	particleGroupDrawCalls_.clear();
+
 	FlushLines();
 	drawCalls_.clear();
+}
+
+void Renderer::DrawParticleGroup(MeshHandle mesh, TextureHandle texture, ID3D12Resource* instancingBuffer, uint32_t srvIndex, uint32_t instanceCount, const std::string& shaderName) {
+	ParticleGroupDrawCall dc;
+	dc.mesh = mesh;
+	dc.tex = texture;
+	dc.instancingBuffer = instancingBuffer;
+	dc.srvIndex = srvIndex;
+	dc.instanceCount = instanceCount;
+	dc.shaderName = shaderName;
+	particleGroupDrawCalls_.push_back(dc);
 }
 
 void Renderer::EndFrame() {
@@ -722,7 +760,7 @@ void Renderer::EndFrame() {
 	list_->RSSetViewports(1, &viewport_);
 	list_->RSSetScissorRects(1, &scissor_);
 
-	ID3D12DescriptorHeap* heaps[] = {srvHeap_};
+	ID3D12DescriptorHeap* heaps[] = {SrvManager::GetInstance()->GetDescriptorHeap()};
 	list_->SetDescriptorHeaps(1, heaps);
 
 	if (framePPEnabled_) {
@@ -856,18 +894,11 @@ void Renderer::SetAreaLight(int index, const Vector3& pos, const Vector3& color,
 }
 
 uint32_t Renderer::AllocateSrvIndex(uint32_t count) {
-	uint32_t idx = srvCursor_;
-	srvCursor_ += count;
-	return idx;
+	return SrvManager::GetInstance()->AllocateSrvIndex(count);
 }
 
 uint32_t Renderer::AllocateDynamicSrvIndex(uint32_t count) {
-	if (srvDynamicCursor_ + count > kSrvHeapTotal) {
-		return UINT32_MAX; // 溢れた
-	}
-	uint32_t idx = srvDynamicCursor_;
-	srvDynamicCursor_ += count;
-	return idx;
+	return SrvManager::GetInstance()->AllocateDynamicSrvIndex(count);
 }
 
 ComPtr<ID3DBlob> Renderer::CompileShader(const char* src, const char* entry, const char* target) {
@@ -1590,7 +1621,6 @@ float4 main(PSIn i) : SV_TARGET { return i.color; }
 		}
 	}
 
-	// ---------------------------------------------------------
 	// ★追加: トゥーンシェーダー・アウトライン用パイプライン
 	// ---------------------------------------------------------
 	{
@@ -1793,8 +1823,8 @@ Renderer::TextureHandle Renderer::LoadTexture2D(const std::string& filePath, boo
 	}
 
 	const uint32_t idx = AllocateSrvIndex();
-	D3D12_CPU_DESCRIPTOR_HANDLE cpu = window_->SRV_CPU((int)idx);
-	D3D12_GPU_DESCRIPTOR_HANDLE gpu = window_->SRV_GPU((int)idx);
+	D3D12_CPU_DESCRIPTOR_HANDLE cpu = SrvManager::GetInstance()->GetCPUDescriptorHandle(idx);
+	D3D12_GPU_DESCRIPTOR_HANDLE gpu = SrvManager::GetInstance()->GetGPUDescriptorHandle(idx);
 	D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
 	srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	srv.Format = fmt;
@@ -1892,7 +1922,7 @@ Renderer::MeshHandle Renderer::LoadObjMesh(const std::string& objFilePath) {
 
 	if (model->GetData().material.textureFilePath.size() > 0) {
 		uint32_t idx = AllocateSrvIndex();
-		model->CreateSrv(dev_, srvHeap_, srvInc_, idx);
+		model->CreateSrv(dev_, SrvManager::GetInstance()->GetDescriptorHeap(), SrvManager::GetInstance()->GetDescriptorSize(), idx);
 	}
 
 	MeshHandle handle = (MeshHandle)models_.size();
@@ -1996,7 +2026,7 @@ void Renderer::FlushSprites() {
 	const float H = (float)Engine::WindowDX::kH;
 	const uint32_t fi = window_->FrameIndex();
 
-	ID3D12DescriptorHeap* heaps[] = { srvHeap_ };
+	ID3D12DescriptorHeap* heaps[] = {SrvManager::GetInstance()->GetDescriptorHeap()};
 	list_->SetDescriptorHeaps(1, heaps);
 	list_->SetPipelineState(pso2D_.Get());
 	list_->SetGraphicsRootSignature(rootSig2D_.Get());
@@ -2113,7 +2143,7 @@ void Renderer::FlushLines() {
 
 		std::memcpy(upload_[fi].mapped + off, vertices.data(), bytesNeeded);
 
-		ID3D12DescriptorHeap* heaps[] = { srvHeap_ };
+		ID3D12DescriptorHeap* heaps[] = { SrvManager::GetInstance()->GetDescriptorHeap() };
 		list_->SetDescriptorHeaps(1, heaps);
 
 		list_->SetPipelineState(pipeline);
@@ -2166,8 +2196,8 @@ bool Renderer::InitPostProcess_() {
 		dev_->CreateRenderTargetView(ppSceneColor_.Get(), nullptr, ppRtv_);
 
 		const uint32_t idx = AllocateSrvIndex();
-		D3D12_CPU_DESCRIPTOR_HANDLE cpu = window_->SRV_CPU((int)idx);
-		ppSrvGpu_ = window_->SRV_GPU((int)idx);
+		D3D12_CPU_DESCRIPTOR_HANDLE cpu = SrvManager::GetInstance()->GetCPUDescriptorHandle(idx);
+		ppSrvGpu_ = SrvManager::GetInstance()->GetGPUDescriptorHandle(idx);
 		D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
 		srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -2274,8 +2304,8 @@ float4 main(float4 svpos:SV_POSITION, float2 uv:TEXCOORD0) : SV_TARGET {
 		dev_->CreateRenderTargetView(finalSceneColor_.Get(), nullptr, finalRtv_);
 
 		const uint32_t idx = AllocateSrvIndex();
-		D3D12_CPU_DESCRIPTOR_HANDLE cpu = window_->SRV_CPU((int)idx);
-		finalSrvGpu_ = window_->SRV_GPU((int)idx);
+		D3D12_CPU_DESCRIPTOR_HANDLE cpu = SrvManager::GetInstance()->GetCPUDescriptorHandle(idx);
+		finalSrvGpu_ = SrvManager::GetInstance()->GetGPUDescriptorHandle(idx);
 		D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
 		srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -2359,8 +2389,8 @@ Renderer::CustomRenderTarget Renderer::CreateRenderTarget(uint32_t width, uint32
 	srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	srv.Texture2D.MipLevels = 1;
 	srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	dev_->CreateShaderResourceView(target.texture.Get(), &srv, window_->SRV_CPU(sIdx));
-	target.srvGpu = window_->SRV_GPU(sIdx);
+	dev_->CreateShaderResourceView(target.texture.Get(), &srv, SrvManager::GetInstance()->GetCPUDescriptorHandle(sIdx));
+	target.srvGpu = SrvManager::GetInstance()->GetGPUDescriptorHandle(sIdx);
 
 	return target;
 }

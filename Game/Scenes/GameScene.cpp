@@ -20,6 +20,7 @@
 #include <Windows.h> // OutputDebugStringA
 #include <algorithm>
 #include <cmath>
+#include "../Engine/ParticleManager.h"
 
 namespace Game {
 
@@ -233,6 +234,7 @@ void GameScene::Update() {
 
 	// パーティクルエディター
 	particleEditor_.Update(dt);
+	Engine::ParticleManager::GetInstance()->Update(dt);
 
 	// ★ 全Systemを順に実行
 	for (auto& system : systems_) {
@@ -468,6 +470,7 @@ void GameScene::Draw() {
 			}
 		}
 	}
+	Engine::ParticleManager::GetInstance()->Draw(camera_);
 
 	// ★ 各Systemの描画処理を呼び出す（UISystem等）
 	for (auto& system : systems_) {

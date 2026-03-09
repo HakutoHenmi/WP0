@@ -1,6 +1,8 @@
 #include "App.h"
 #include <Windows.h>
 #include "JobSystem.h"
+#include "ParticleManager.h"
+#include "SrvManager.h"
 
 
 namespace Engine {
@@ -17,12 +19,15 @@ bool App::Initialize(HINSTANCE hInst, int cmdShow) {
 	if (!renderer_.Initialize(&dx_))
 		return false;
 
+	ParticleManager::GetInstance()->Initialize(&renderer_);
+
 	input_.Initialize(hInst, hwnd_);
 	camera_.Initialize();
 	audio_.Initialize();
 
 #ifdef USE_IMGUI
-	if (!imgui_.Initialize(hwnd_, dx_, dx_.SRV(), dx_.SRV_CPU(0), dx_.SRV_GPU(0), 18.0f, "Resources/fonts/Huninn/Huninn-Regular.ttf")) {
+	auto* srvM = SrvManager::GetInstance();
+	if (!imgui_.Initialize(hwnd_, dx_, srvM->GetDescriptorHeap(), srvM->GetCPUDescriptorHandle(0), srvM->GetGPUDescriptorHandle(0), 18.0f, "Resources/fonts/Huninn/Huninn-Regular.ttf")) {
 		return false;
 	}
 #endif

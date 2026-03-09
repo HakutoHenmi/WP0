@@ -10,6 +10,7 @@
 
 #include "d3dx12.h"
 #include <DirectXTex.h>
+#include "SrvManager.h" // ★追加
 
 // Assimp Includes
 #include <assimp/Importer.hpp>
@@ -363,14 +364,16 @@ void Model::UpdateVertices(const std::vector<VertexData>& vertices) {
 	vb_->Unmap(0, nullptr);
 }
 
-void Model::CreateSrv(ID3D12Device* device, ID3D12DescriptorHeap* srvHeap, UINT descriptorSize, UINT heapIndex) {
+void Model::CreateSrv(ID3D12Device* /*device*/, ID3D12DescriptorHeap* srvHeap, UINT descriptorSize, UINT heapIndex) {
 	if (!hasTexture_)
 		return;
+	
+	Engine::SrvManager::GetInstance()->CreateSRVForTexture2D(heapIndex, tex_.Get(), srvDesc_.Format, srvDesc_.Texture2D.MipLevels);
+
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu = srvHeap->GetCPUDescriptorHandleForHeapStart();
 	cpu.ptr += (SIZE_T)descriptorSize * heapIndex;
 	srvGpu_ = srvHeap->GetGPUDescriptorHandleForHeapStart();
 	srvGpu_.ptr += (UINT64)descriptorSize * heapIndex;
-	device->CreateShaderResourceView(tex_.Get(), &srvDesc_, cpu);
 }
 
 void Model::Draw(ID3D12GraphicsCommandList* cmd, UINT /*root*/) {
