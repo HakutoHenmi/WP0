@@ -94,7 +94,7 @@ size_t Audio::Play(uint32_t soundHandle, bool loop, float volume) {
 	const auto& sd = soundDatas_[soundHandle];
 	IXAudio2SourceVoice* src = nullptr;
 
-	if (FAILED(xa_->CreateSourceVoice(&src, &sd.wfx))) {
+	if (FAILED(xa_->CreateSourceVoice(&src, reinterpret_cast<const WAVEFORMATEX*>(sd.formatData.data())))) {
 		return 0;
 	}
 
@@ -203,11 +203,13 @@ bool Audio::LoadViaMF(const std::wstring& path, SoundData& outData) {
 	reader->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, &outputMediaType);
 
 	WAVEFORMATEX* pWfx = nullptr;
-	UINT32 size = 0;
-	MFCreateWaveFormatExFromMFMediaType(outputMediaType.Get(), &pWfx, &size);
-	if (pWfx) {
-		outData.wfx = *pWfx;
+	UINT32 wfxSize = 0;
+	hr = MFCreateWaveFormatExFromMFMediaType(outputMediaType.Get(), &pWfx, &wfxSize);
+	if (SUCCEEDED(hr) && pWfx) {
+		outData.formatData.assign(reinterpret_cast<BYTE*>(pWfx), reinterpret_cast<BYTE*>(pWfx) + wfxSize);
 		CoTaskMemFree(pWfx);
+	} else {
+		return false;
 	}
 
 	// PCMデータをサンプル単位で読み出し、バッファに蓄積
