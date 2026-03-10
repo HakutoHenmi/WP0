@@ -1841,6 +1841,7 @@ Renderer::TextureHandle Renderer::LoadTexture2D(const std::string& filePath, boo
 
 void Renderer::DrawMeshInstanced(MeshHandle mesh, TextureHandle texture, const Transform& transform, const Vector4& mulColor, 
 								 const std::string& shaderName, const std::vector<TextureHandle>& extraTex) {
+	if (!this || mesh >= models_.size() || texture >= textures_.size()) return;
 	// 既存のInstancedDrawCallを探す
 	auto it = std::find_if(instancedDrawCalls_.begin(), instancedDrawCalls_.end(), [&](const InstancedDrawCall& idc) {
 		return idc.mesh == mesh && idc.tex == texture && idc.shaderName == shaderName && idc.extraTex == extraTex;
@@ -1934,8 +1935,7 @@ Model* Renderer::GetModel(MeshHandle handle) {
 }
 
 void Renderer::DrawMesh(MeshHandle meshH, TextureHandle texH, const Transform& tr, const Vector4& mulColor, const std::string& shaderName) {
-	if (meshH == 0 || meshH >= models_.size())
-		return;
+	if (!this || meshH >= models_.size() || texH >= textures_.size()) return;
 
 	DrawCall dc{};
 	dc.mesh = meshH;
@@ -1965,8 +1965,7 @@ void Renderer::DrawParticle(MeshHandle meshH, TextureHandle texH, const Transfor
 }
 
 void Renderer::DrawSkinnedMesh(MeshHandle meshH, TextureHandle texH, const Transform& tr, const std::vector<Matrix4x4>& bones, const Vector4& mulColor) {
-	if (meshH == 0 || meshH >= models_.size())
-		return;
+	if (!this || meshH >= models_.size() || texH >= textures_.size()) return;
 
 	DrawCall dc{};
 	dc.mesh = meshH;
@@ -1980,12 +1979,12 @@ void Renderer::DrawSkinnedMesh(MeshHandle meshH, TextureHandle texH, const Trans
 }
 
 void Renderer::DrawSprite(TextureHandle texH, const SpriteDesc& s) {
-	if (texH == 0 || texH >= textures_.size()) return;
+	if (!this || texH >= textures_.size()) return;
 	spriteDrawCalls_.push_back({ texH, s });
 }
 
 void Renderer::DrawSprite9Slice(TextureHandle texH, const Sprite9SliceDesc& s) {
-	if (texH >= textures_.size() || !textures_[texH].res) return;
+	if (!this || texH >= textures_.size() || !textures_[texH].res) return;
 
 	D3D12_RESOURCE_DESC texDesc = textures_[texH].res->GetDesc();
 	float tw = (float)texDesc.Width;

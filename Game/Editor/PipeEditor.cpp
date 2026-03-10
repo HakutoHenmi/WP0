@@ -80,6 +80,7 @@ void PipeEditor::ClearPreview(GameScene* scene) {
 }
 
 void PipeEditor::DrawUI() {
+#ifdef USE_IMGUI
     if (ImGui::Button(pipeMode_ ? "Pipe Mode [ON]" : "Pipe Mode [OFF]")) {
         SetPipeMode(!pipeMode_);
     }
@@ -102,9 +103,11 @@ void PipeEditor::DrawUI() {
             ImGui::PopItemWidth();
         }
     }
+#endif
 }
 
 void PipeEditor::UpdateAndDraw(GameScene* scene, Engine::Renderer* renderer, const ImVec2& gameImageMin, const ImVec2& /*gameImageMax*/, float tW, float tH) {
+#ifdef USE_IMGUI
     if (!scene || scene->IsPlaying() || !pipeMode_ || !behavior_) {
         if (previewJointId_ != -1 || previewPipeId_ != -1) ClearPreview(scene);
         return;
@@ -280,6 +283,9 @@ void PipeEditor::UpdateAndDraw(GameScene* scene, Engine::Renderer* renderer, con
         hasPipeStart_ = false;
         pipeStartNode_ = {0, 0, 0};
     }
+#else
+    (void)scene; (void)renderer; (void)gameImageMin; (void)tW; (void)tH;
+#endif
 }
 
 } // namespace Game

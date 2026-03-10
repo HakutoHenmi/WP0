@@ -82,10 +82,10 @@ void App::Run() {
 		renderer_.EndFrame();
 
 #ifdef USE_IMGUI
- 		Engine::IScene* currentScene = sceneManager_.Current();
- 		if (currentScene) {
- 			currentScene->DrawEditor();
- 		}
+		Engine::IScene* currentScene = sceneManager_.Current();
+		if (currentScene) {
+			currentScene->DrawEditor();
+		}
 
 		imgui_.Render(dx_);
 #endif

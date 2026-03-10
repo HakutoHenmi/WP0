@@ -136,12 +136,14 @@ void Canon::Update(SceneObject& obj, GameScene* scene, float dt) {
 		connectedText = "YES";
 	}
 
+#ifdef USE_IMGUI
 	ImGui::Begin("Debug Pipe");
 	ImGui::Text("Objects: %d", objectCount);
 	ImGui::Text("Pipes  : %d", pipeCount);
 	ImGui::Text("Enemies: %d", enemyCount);
 	ImGui::Text("Canon connected to tank: %s", connectedText);
 	ImGui::End();
+#endif
 
 	// クールダウン
 	if (attackTimer_ > 0.0f) {

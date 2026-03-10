@@ -5,6 +5,7 @@
 namespace Engine {
 
 void ParticleEditor::Initialize() {
+#ifdef USE_IMGUI
 	previewEmitter_.Initialize(*Renderer::GetInstance(), "PreviewEmitter");
 	targetEmitter = &previewEmitter_;
 
@@ -15,9 +16,11 @@ void ParticleEditor::Initialize() {
 	// ★修正: 透視投影行列を設定（これがないと何も描画されない）
 	previewCamera_.SetProjection(0.7854f, 1.0f, 0.1f, 200.0f); // FOV=45度, aspect=1:1
 	previewCamera_.SetPosition(0, 2, -10);
+#endif
 }
 
 void ParticleEditor::Update(float dt) {
+#ifdef USE_IMGUI
 	if (targetEmitter == &previewEmitter_) {
 		previewEmitter_.Update(dt);
 	}
@@ -47,15 +50,17 @@ void ParticleEditor::Update(float dt) {
 	previewCamera_.SetPosition(pos.x, pos.y, pos.z);
 	// ★修正: LookAtで常に原点方向を向かせる（SetRotationだとズレやすい）
 	previewCamera_.LookAt(0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f);
+#else
+    (void)dt;
+#endif
 }
 
 void ParticleEditor::DrawPreview(const Camera& cam) {
 	(void)cam; // unused
-	// ★変更: このDrawPreview自体はメイン描画からは呼ばれないが、
-	// Renderer内部の独自パスでオフスクリーン描画を実行する
 }
 
 void ParticleEditor::DrawUI() {
+#ifdef USE_IMGUI
 	if (!targetEmitter) return;
 
 	ImGui::Begin("Particle Editor");
@@ -190,6 +195,7 @@ void ParticleEditor::DrawUI() {
 	}
 
 	ImGui::End();
+#endif
 }
 
 } // namespace Engine

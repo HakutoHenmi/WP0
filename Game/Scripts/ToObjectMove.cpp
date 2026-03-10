@@ -81,6 +81,7 @@ void ToObjectMove::OnDestroy(SceneObject& /*obj*/, GameScene* /*scene*/) {
 }
 
 void ToObjectMove::ChangeTargetTag(SceneObject& /*obj*/, GameScene* scene, float /*dt*/) {
+#ifdef USE_IMGUI
 	if (ImGui::InputText("Target Tag", tagBuffer_, sizeof(tagBuffer_))) {
 		targetName_ = tagBuffer_;
 
@@ -98,6 +99,9 @@ void ToObjectMove::ChangeTargetTag(SceneObject& /*obj*/, GameScene* scene, float
 			}
 		}
 	}
+#else
+	(void)scene;
+#endif
 }
 
 // ★ スクリプト自動登録

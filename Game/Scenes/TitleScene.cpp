@@ -36,12 +36,14 @@ void TitleScene::Draw() {
 }
 
 void TitleScene::DrawEditor() {
+#ifdef USE_IMGUI
 	ImGui::Begin("Title Menu");
 	if (ImGui::Button("Start Game")) {
 		Engine::SceneManager::GetInstance()->Change("Game");
 	}
 	ImGui::Text("Press SPACE to start");
 	ImGui::End();
+#endif
 }
 
 } // namespace Game
