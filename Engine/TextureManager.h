@@ -7,7 +7,6 @@
 #include <wrl.h>
 
 #include "Renderer.h"
-#include "Renderer.h"
 
 namespace Engine {
 

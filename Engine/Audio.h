@@ -16,7 +16,7 @@ namespace Engine {
 // 音声データ構造体
 struct SoundData {
 	std::vector<BYTE> data;
-	WAVEFORMATEX wfx;
+	std::vector<BYTE> formatData; // WAVEFORMATEX + 拡張情報
 };
 
 // 再生中のボイス情報
