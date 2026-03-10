@@ -135,6 +135,8 @@ public:
 
 	static Renderer* GetInstance() { return instance_; }
 	ID3D12Device* GetDevice() const { return dev_; }
+	ID3D12GraphicsCommandList* GetCommandList() const { return list_; }
+	WindowDX* GetWindow() const { return window_; }
 
 	void BeginFrame(const float clearColorRGBA[4]);
 	void EndFrame();

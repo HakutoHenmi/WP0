@@ -21,10 +21,10 @@ void ParticleSystem::Initialize(Renderer& renderer, size_t maxCount, const std::
 	maxCount_ = static_cast<uint32_t>(maxCount);
 
 	// インスタンシング用バッファの作成
-	if (renderer_->GetDevice()) {
+	if (SrvManager::GetInstance()->GetDevice()) {
 		CD3DX12_HEAP_PROPERTIES hp(D3D12_HEAP_TYPE_UPLOAD);
 		CD3DX12_RESOURCE_DESC rd = CD3DX12_RESOURCE_DESC::Buffer(sizeof(ParticleInstanceData) * maxCount_);
-		renderer_->GetDevice()->CreateCommittedResource(
+		SrvManager::GetInstance()->GetDevice()->CreateCommittedResource(
 			&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&instancingBuffer_));
 		
 		srvIndex_ = Engine::SrvManager::GetInstance()->AllocateSrvIndex();

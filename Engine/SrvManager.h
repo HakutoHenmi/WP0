@@ -33,6 +33,7 @@ public:
 
     ID3D12DescriptorHeap* GetDescriptorHeap() const { return descriptorHeap_.Get(); }
     uint32_t GetDescriptorSize() const { return descriptorSize_; }
+    ID3D12Device* GetDevice() const { return device_; }
 
     static constexpr uint32_t kMaxSRVs = 2048;
     static constexpr uint32_t kStaticMax = 1000;

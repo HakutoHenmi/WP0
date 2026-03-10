@@ -19,6 +19,7 @@ bool App::Initialize(HINSTANCE hInst, int cmdShow) {
 	if (!renderer_.Initialize(&dx_))
 		return false;
 
+	TextureManager::Instance().Initialize(&renderer_);
 	ParticleManager::GetInstance()->Initialize(&renderer_);
 
 	input_.Initialize(hInst, hwnd_);

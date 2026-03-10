@@ -7,7 +7,7 @@
 #include <wrl.h>
 
 #include "Renderer.h"
-#include "WindowDX.h"
+#include "Renderer.h"
 
 namespace Engine {
 
@@ -20,7 +20,7 @@ class TextureManager {
 public:
 	static TextureManager& Instance();
 
-	void Initialize(WindowDX* dx, Renderer* renderer);
+	void Initialize(Renderer* renderer);
 	void Shutdown();
 
 	// relPath: exeと同じフォルダからの相対パス(L"Resources/sample.png" など)
@@ -50,11 +50,7 @@ private:
 		D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
 	};
 
-	WindowDX* dx_ = nullptr;
 	Renderer* renderer_ = nullptr;
-
-	// SRV は WindowDX のヒープを使用。0..3 は予約済みなので、ゲーム用は 10 から。
-	int srvCursor_ = 10;
 
 	std::unordered_map<std::wstring, int> pathToIndex_;
 	std::vector<TexData> textures_;
