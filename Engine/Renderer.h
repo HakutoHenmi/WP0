@@ -290,25 +290,25 @@ private:
 	};
 
 	struct InstanceData {
-		Matrix4x4 world;
-		Vector4 color;
-		Vector4 uvScaleOffset; // ★追加: UVスケール・オフセット用
+		Matrix4x4 world = Matrix4x4::Identity();
+		Vector4 color = {1,1,1,1};
+		Vector4 uvScaleOffset = {1,1,1,1}; // ★追加: UVスケール・オフセット用
 	};
 
 	struct InstancedDrawCall {
-		MeshHandle mesh;
-		TextureHandle tex;
+		MeshHandle mesh = 0;
+		TextureHandle tex = 0;
 		std::vector<TextureHandle> extraTex; // ★追加
 		std::string shaderName;
 		std::vector<InstanceData> instances;
 	};
 
 	struct ParticleGroupDrawCall {
-		MeshHandle mesh;
-		TextureHandle tex;
-		ID3D12Resource* instancingBuffer; // ★追加：GPU Virtual Address 取得用
-		uint32_t srvIndex;
-		uint32_t instanceCount;
+		MeshHandle mesh = 0;
+		TextureHandle tex = 0;
+		ID3D12Resource* instancingBuffer = nullptr; // ★追加：GPU Virtual Address 取得用
+		uint32_t srvIndex = 0;
+		uint32_t instanceCount = 0;
 		std::string shaderName;
 	};
 

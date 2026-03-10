@@ -18,6 +18,7 @@ void SrvManager::Initialize(ID3D12Device* device) {
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     
     HRESULT hr = device_->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&descriptorHeap_));
+    (void)hr;
     assert(SUCCEEDED(hr));
 }
 

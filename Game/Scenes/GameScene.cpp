@@ -27,6 +27,15 @@ namespace Game {
 void GameScene::Initialize(Engine::WindowDX* dx) {
 	dx_ = dx;
 	renderer_ = Engine::Renderer::GetInstance();
+
+	// ★ コンテキストを早期に初期化
+	ctx_.renderer = renderer_;
+	ctx_.camera = &camera_;
+	ctx_.input = Engine::Input::GetInstance();
+	ctx_.scene = this;
+	ctx_.pendingSpawns = &pendingSpawns_;
+	ctx_.isPlaying = false;
+
 	camera_.Initialize();
 	// ★追加: 明示的にプロジェクションを設定 (1920x1080のアスペクト比)
 	camera_.SetProjection(0.7854f, (float)Engine::WindowDX::kW / (float)Engine::WindowDX::kH, 0.1f, 1000.0f);
@@ -492,9 +501,11 @@ void GameScene::Draw() {
 	}
 }
 
+#ifdef USE_IMGUI
 extern GizmoMode currentGizmoMode;
 extern bool gizmoDragging;
 extern int gizmoDragAxis;
+#endif
 
 void GameScene::DrawSelectionHighlight() {
 	if (!renderer_)
@@ -647,6 +658,7 @@ void GameScene::DrawSelectionHighlight() {
 			renderer_->DrawLine3D(wp0, wp1, col, true);
 		};
 
+#ifdef USE_IMGUI
 		const float al = 2.0f, ar = 0.3f;
 		int dAxis = (gizmoDragging && idx == selectedObjectIndex_) ? gizmoDragAxis : -1;
 		auto axCol = [](int axis, int drag) -> Engine::Vector4 {
@@ -695,6 +707,7 @@ void GameScene::DrawSelectionHighlight() {
 			drawLocalLine({0, -e, al - e}, {0, e, al + e}, cZ);
 			drawLocalLine({0, e, al - e}, {0, -e, al + e}, cZ);
 		}
+#endif
 	}
 }
 

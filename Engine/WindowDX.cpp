@@ -12,8 +12,9 @@
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 
-// ImGuiのメッセージハンドラ
+#ifdef USE_IMGUI
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+#endif
 
 namespace Engine {
 
@@ -21,9 +22,11 @@ namespace Engine {
 std::string WindowDX::s_DropDirectory = "Resources";
 
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
+#ifdef USE_IMGUI
 	if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wp, lp)) {
 		return true;
 	}
+#endif
 
 	switch (msg) {
 	case WM_DESTROY:

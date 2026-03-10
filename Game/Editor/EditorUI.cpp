@@ -2,8 +2,8 @@
 #include "../../externals/imgui/imgui.h"
 #include "../../externals/imgui/imgui_internal.h"
 #include "../Scenes/GameScene.h"
-#include "../Systems/RiverSystem.h" // ★追加
-#include "../Systems/UISystem.h"    // ★追加
+#include "../Systems/RiverSystem.h"
+#include "../Systems/UISystem.h"
 #include "Audio.h"
 #include "PipeEditor.h"
 #include "SceneManager.h"
@@ -22,52 +22,69 @@
 namespace Game {
 namespace fs = std::filesystem;
 
-// ====== Static State ======
-static std::deque<UndoCommand> undoStack;
-static std::deque<UndoCommand> redoStack;
-static constexpr size_t kMaxUndoDepth = 100;
-// ★ non-static: GameScene.cppからexternで参照
-GizmoMode currentGizmoMode = GizmoMode::Translate;
-static std::deque<LogEntry> consoleLog;
-static constexpr size_t kMaxConsoleLines = 500;
-static float globalTime = 0.0f;
-
-// ★ ビューポート操作用の状態 (non-static: extern参照)
-bool gizmoDragging = false;
-int gizmoDragAxis = -1; // 0=X, 1=Y, 2=Z
-static std::map<int, Engine::Transform> dragStartTransforms = {};
-static ImVec2 gizmoDragStartMouse = {};
-static bool objectDragging = false;               // ★ 自由ドラッグ中フラグ
-static std::vector<SceneObject> clipboardObjects; // Ctrl+C コピー用
-static bool s_riverPlaceMode = false;             // ★追加: 川ポイント配置モード
-static int s_riverPlaceCompIdx = 0;               // 川コンポーネントindexコピー用
-
-// ★UIギズモ用ドラッグ状態
-static bool uiDragging = false;
-static int uiDragHandle = -1; // 0..7: Corners/Edges, 8: Center (Move)
-static DirectX::XMFLOAT2 uiDragStartPos = {};
-static DirectX::XMFLOAT2 uiDragStartSize = {};
-static DirectX::XMFLOAT2 uiDragStartHitOffset = {};
-static DirectX::XMFLOAT2 uiDragStartHitScale = {};
-static bool uiHoveredAny = false; // 次のフレームのクリック判定用
-static int uiHoveredHandle = -1;
-
-// ★ Gameウィンドウの画像座標 (ピッキング用)
-static ImVec2 gameImageMin = {};
-static ImVec2 gameImageMax = {};
-
-static PipeEditor s_pipeEditor;
+// ====== Static State (Shared) ======
 static uint32_t nextObjectId = 1;
 static uint32_t GenerateId() { return nextObjectId++; }
 
+// ====== Undo / Redo (Shared) ======
+static std::deque<UndoCommand> undoStack;
+static std::deque<UndoCommand> redoStack;
+
+void EditorUI::PushUndo(const UndoCommand& cmd) {
+	undoStack.push_back(cmd);
+	if (undoStack.size() > 100)
+		undoStack.pop_front();
+	redoStack.clear();
+}
+void EditorUI::Undo() {
+	if (undoStack.empty())
+		return;
+	auto cmd = undoStack.back();
+	undoStack.pop_back();
+	cmd.undo();
+	redoStack.push_back(cmd);
+}
+void EditorUI::Redo() {
+	if (redoStack.empty())
+		return;
+	auto cmd = redoStack.back();
+	redoStack.pop_back();
+	cmd.redo();
+	undoStack.push_back(cmd);
+}
+
+// ====== Console & Clipboard (Shared) ======
+float globalTime = 0.0f;
+std::deque<LogEntry> consoleLog;
+static std::vector<SceneObject> clipboardObjects;
+GizmoMode currentGizmoMode = GizmoMode::Translate;
+static uint32_t selectedAxis = 0xFFFFFFFF;
+static bool isDragging = false;
+static DirectX::XMVECTOR dragStartPos;
+static PipeEditor s_pipeEditor;
+bool gizmoDragging = false;
+int gizmoDragAxis = -1;
+static ImVec2 gizmoDragStartMouse;
+static std::map<int, Engine::Transform> dragStartTransforms;
+static bool objectDragging = false;
+static bool uiHoveredAny = false;
+static int uiHoveredHandle = -1;
+static bool uiDragging = false;
+static int uiDragHandle = -1;
+static DirectX::XMFLOAT2 uiDragStartPos;
+static DirectX::XMFLOAT2 uiDragStartSize;
+static DirectX::XMFLOAT2 uiDragStartHitOffset;
+static DirectX::XMFLOAT2 uiDragStartHitScale;
+static ImVec2 gameImageMin;
+static ImVec2 gameImageMax;
+static bool s_riverPlaceMode = false;
+static int s_riverPlaceCompIdx = 0;
+
 // ★ コピー/複製時のユニーク名生成
 static std::string GenerateCopyName(const std::string& baseName, const std::vector<SceneObject>& objects) {
-	// 末尾の "_数字" や " (Copy)" を除去してベース名を取得
 	std::string base = baseName;
-	// " (Copy)" の繰り返しを除去
 	while (base.size() > 7 && base.substr(base.size() - 7) == " (Copy)")
 		base = base.substr(0, base.size() - 7);
-	// "_数字" を除去
 	{
 		auto pos = base.rfind('_');
 		if (pos != std::string::npos && pos + 1 < base.size()) {
@@ -81,84 +98,205 @@ static std::string GenerateCopyName(const std::string& baseName, const std::vect
 				base = base.substr(0, pos);
 		}
 	}
-	if (base.empty())
-		base = "Object";
-	// 既存のオブジェクト名から最大番号を探す
+	if (base.empty()) base = "Object";
 	int maxNum = 0;
 	for (const auto& obj : objects) {
 		if (obj.name.size() > base.size() + 1 && obj.name.substr(0, base.size()) == base && obj.name[base.size()] == '_') {
 			std::string numPart = obj.name.substr(base.size() + 1);
 			bool allDigit = true;
-			for (char c : numPart)
-				if (!isdigit((unsigned char)c)) {
-					allDigit = false;
-					break;
-				}
+			for (char c : numPart) if (!isdigit((unsigned char)c)) { allDigit = false; break; }
 			if (allDigit && !numPart.empty()) {
 				int n = std::stoi(numPart);
-				if (n > maxNum)
-					maxNum = n;
+				if (n > maxNum) maxNum = n;
 			}
 		}
 	}
 	return base + "_" + std::to_string(maxNum + 1);
 }
 
-// ====== Undo/Redo ======
-void EditorUI::PushUndo(const UndoCommand& cmd) {
-	undoStack.push_back(cmd);
-	if (undoStack.size() > kMaxUndoDepth)
-		undoStack.pop_front();
-	redoStack.clear();
-}
-void EditorUI::Undo() {
-	if (undoStack.empty())
-		return;
-	auto c = undoStack.back();
-	undoStack.pop_back();
-	c.undo();
-	redoStack.push_back(c);
-}
-void EditorUI::Redo() {
-	if (redoStack.empty())
-		return;
-	auto c = redoStack.back();
-	redoStack.pop_back();
-	c.redo();
-	undoStack.push_back(c);
+// ====== Path Helper (Shared) ======
+std::string EditorUI::GetUnifiedProjectPath(const std::string& path) {
+	std::string absPath = path;
+	if (absPath.length() >= 2 && (absPath[1] == ':' || absPath[0] == '/' || absPath[0] == '\\')) {
+		return absPath;
+	}
+	char exePath[MAX_PATH] = {0};
+	::GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+	std::filesystem::path currentP = std::filesystem::path(exePath).parent_path();
+	std::filesystem::path exeDir = currentP;
+	while (currentP.has_parent_path() && currentP.filename() != "Engine") {
+		auto parent = currentP.parent_path();
+		if (parent == currentP) break;
+		currentP = parent;
+	}
+	if (currentP.filename() == "Engine") {
+		std::filesystem::path projectDir = currentP / "TD_Engine";
+		return (projectDir / path).string();
+	}
+	return (exeDir / path).string();
 }
 
-// ====== Console ======
-void EditorUI::Log(const std::string& msg) {
-	consoleLog.push_back({LogLevel::Info, msg, globalTime});
-	if (consoleLog.size() > kMaxConsoleLines)
-		consoleLog.pop_front();
-}
-void EditorUI::LogWarning(const std::string& msg) {
-	consoleLog.push_back({LogLevel::Warning, msg, globalTime});
-	if (consoleLog.size() > kMaxConsoleLines)
-		consoleLog.pop_front();
-}
-void EditorUI::LogError(const std::string& msg) {
-	consoleLog.push_back({LogLevel::Error, msg, globalTime});
-	if (consoleLog.size() > kMaxConsoleLines)
-		consoleLog.pop_front();
-}
-
-// ====== JSON Save ======
+// ====== JSON Helpers (Shared) ======
 static std::string EscapeJson(const std::string& s) {
 	std::string o;
 	for (char c : s) {
-		if (c == '"')
-			o += "\\\"";
-		else if (c == '\\')
-			o += "\\\\";
-		else
-			o += c;
+		if (c == '"') o += "\\\"";
+		else if (c == '\\') o += "\\\\";
+		else o += c;
 	}
 	return o;
 }
 
+static std::string UnescapeJson(const std::string& s) {
+	std::string o;
+	for (size_t i = 0; i < s.size(); ++i) {
+		if (s[i] == '\\' && i + 1 < s.size()) {
+			o += s[i + 1]; i++;
+		} else {
+			o += s[i];
+		}
+	}
+	return o;
+}
+
+static size_t FindBlockEnd(const std::string& str, size_t startPos) {
+	int depth = 0;
+	bool inString = false;
+	bool escape = false;
+	for (size_t i = startPos; i < str.size(); ++i) {
+		char c = str[i];
+		if (escape) { escape = false; continue; }
+		if (c == '\\') { escape = true; continue; }
+		if (c == '"') { inString = !inString; continue; }
+		if (!inString) {
+			if (c == '{' || c == '[') depth++;
+			else if (c == '}' || c == ']') {
+				depth--;
+				if (depth <= 0) return i;
+			}
+		}
+	}
+	return std::string::npos;
+}
+
+static std::string ExtractString(const std::string& block, const std::string& key) {
+	auto pos = block.find("\"" + key + "\"");
+	if (pos == std::string::npos) return "";
+	auto q1 = block.find("\"", block.find(":", pos) + 1);
+	if (q1 == std::string::npos) return "";
+	size_t q2 = q1 + 1;
+	while (q2 < block.size()) {
+		if (block[q2] == '\\') q2 += 2;
+		else if (block[q2] == '"') break;
+		else q2++;
+	}
+	if (q2 >= block.size()) return "";
+	return UnescapeJson(block.substr(q1 + 1, q2 - q1 - 1));
+}
+
+static std::vector<std::string> ExtractStringArray(const std::string& block, const std::string& key) {
+	std::vector<std::string> res;
+	auto pos = block.find("\"" + key + "\"");
+	if (pos == std::string::npos) return res;
+	auto arrStart = block.find("[", pos);
+	if (arrStart == std::string::npos) return res;
+	auto arrEnd = FindBlockEnd(block, arrStart);
+	if (arrEnd == std::string::npos) return res;
+	std::string ab = block.substr(arrStart + 1, arrEnd - arrStart - 1);
+	size_t cur = 0;
+	while (cur < ab.size()) {
+		auto q1 = ab.find("\"", cur);
+		if (q1 == std::string::npos) break;
+		size_t q2 = q1 + 1;
+		while (q2 < ab.size()) {
+			if (ab[q2] == '\\') q2 += 2;
+			else if (ab[q2] == '"') break;
+			else q2++;
+		}
+		if (q2 >= ab.size()) break;
+		res.push_back(UnescapeJson(ab.substr(q1 + 1, q2 - q1 - 1)));
+		cur = q2 + 1;
+	}
+	return res;
+}
+
+static std::vector<float> ExtractArray(const std::string& block, const std::string& key) {
+	std::vector<float> r;
+	auto pos = block.find("\"" + key + "\"");
+	if (pos == std::string::npos) return r;
+	auto b = block.find("[", pos);
+	auto e = block.find("]", b);
+	if (b == std::string::npos || e == std::string::npos) return r;
+	std::istringstream ss(block.substr(b + 1, e - b - 1));
+	float v;
+	while (ss >> v) { r.push_back(v); char c; ss >> c; }
+	return r;
+}
+
+static float ExtractFloat(const std::string& block, const std::string& key, float defaultVal) {
+	auto pos = block.find("\"" + key + "\"");
+	if (pos == std::string::npos) return defaultVal;
+	auto col = block.find(":", pos);
+	if (col == std::string::npos) return defaultVal;
+	std::string s = block.substr(col + 1);
+	size_t start = 0;
+	while (start < s.size() && (std::isspace((unsigned char)s[start]) || s[start] == ':' || s[start] == ',')) start++;
+	return (float)std::atof(s.c_str() + start);
+}
+
+static uint32_t ExtractUint(const std::string& block, const std::string& key, uint32_t defaultVal) {
+	auto pos = block.find("\"" + key + "\"");
+	if (pos == std::string::npos) return defaultVal;
+	auto col = block.find(":", pos);
+	if (col == std::string::npos) return defaultVal;
+	std::string s = block.substr(col + 1);
+	size_t start = 0;
+	while (start < s.size() && (std::isspace((unsigned char)s[start]) || (unsigned char)s[start] == ':' || (unsigned char)s[start] == ',')) start++;
+	if (start >= s.size() || !isdigit((unsigned char)s[start])) return defaultVal;
+	return (uint32_t)std::stoul(s.substr(start));
+}
+
+static bool ExtractBool(const std::string& block, const std::string& key, bool defaultVal) {
+	auto pos = block.find("\"" + key + "\"");
+	if (pos == std::string::npos) return defaultVal;
+	if (block.find("true", pos) != std::string::npos && block.find("true", pos) < pos + 30) return true;
+	if (block.find("false", pos) != std::string::npos && block.find("false", pos) < pos + 30) return false;
+	return defaultVal;
+}
+
+// ====== Logging (Always) ======
+void EditorUI::Log(const std::string& msg) {
+#ifdef USE_IMGUI
+	extern float globalTime;
+	extern std::deque<LogEntry> consoleLog;
+	consoleLog.push_back({LogLevel::Info, msg, globalTime});
+	if (consoleLog.size() > 500) consoleLog.pop_front();
+#else
+	OutputDebugStringA(("[INFO] " + msg + "\n").c_str());
+#endif
+}
+void EditorUI::LogWarning(const std::string& msg) {
+#ifdef USE_IMGUI
+	extern float globalTime;
+	extern std::deque<LogEntry> consoleLog;
+	consoleLog.push_back({LogLevel::Warning, msg, globalTime});
+	if (consoleLog.size() > 500) consoleLog.pop_front();
+#else
+	OutputDebugStringA(("[WARN] " + msg + "\n").c_str());
+#endif
+}
+void EditorUI::LogError(const std::string& msg) {
+#ifdef USE_IMGUI
+	extern float globalTime;
+	extern std::deque<LogEntry> consoleLog;
+	consoleLog.push_back({LogLevel::Error, msg, globalTime});
+	if (consoleLog.size() > 500) consoleLog.pop_front();
+#else
+	OutputDebugStringA(("[ERR ] " + msg + "\n").c_str());
+#endif
+}
+
+// ====== Serialization Logic (Shared) ======
 static std::string SerializeSceneObject(const SceneObject& o) {
 	std::stringstream ss;
 	ss << "    {\n";
@@ -181,203 +319,118 @@ static std::string SerializeSceneObject(const SceneObject& o) {
 	ss << "      \"components\": [\n";
 	bool first = true;
 	for (const auto& mr : o.meshRenderers) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		ss << "        {\"type\": \"MeshRenderer\", \"enabled\": " << (mr.enabled ? "true" : "false") << ", \"modelPath\": \"" << EscapeJson(mr.modelPath) << "\", \"texturePath\": \""
 		   << EscapeJson(mr.texturePath) << "\", \"color\": [" << mr.color.x << "," << mr.color.y << "," << mr.color.z << "," << mr.color.w << "], \"uvTiling\": [" << mr.uvTiling.x << ","
 		   << mr.uvTiling.y << "], \"uvOffset\": [" << mr.uvOffset.x << "," << mr.uvOffset.y << "], \"extraTexturePaths\": [";
-		for (size_t i = 0; i < mr.extraTexturePaths.size(); ++i) {
-			ss << "\"" << EscapeJson(mr.extraTexturePaths[i]) << "\"" << (i == mr.extraTexturePaths.size() - 1 ? "" : ", ");
-		}
+		for (size_t i = 0; i < mr.extraTexturePaths.size(); ++i) { ss << "\"" << EscapeJson(mr.extraTexturePaths[i]) << "\"" << (i == mr.extraTexturePaths.size() - 1 ? "" : ", "); }
 		ss << "], \"lightmapPath\": \"" << EscapeJson(mr.lightmapPath) << "\", \"shaderName\": \"" << EscapeJson(mr.shaderName) << "\"}";
 	}
 	for (const auto& bc : o.boxColliders) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		ss << "        {\"type\": \"BoxCollider\", \"enabled\": " << (bc.enabled ? "true" : "false") << ", \"center\": [" << bc.center.x << "," << bc.center.y << "," << bc.center.z << "], \"size\": ["
 		   << bc.size.x << "," << bc.size.y << "," << bc.size.z << "], \"isTrigger\": " << (bc.isTrigger ? "true" : "false") << "}";
 	}
 	for (const auto& tg : o.tags) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		ss << "        {\"type\": \"Tag\", \"enabled\": " << (tg.enabled ? "true" : "false") << ", \"tag\": \"" << EscapeJson(tg.tag) << "\"}";
 	}
 	for (const auto& an : o.animators) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		ss << "        {\"type\": \"Animator\", \"enabled\": " << (an.enabled ? "true" : "false") << ", \"currentAnimation\": \"" << EscapeJson(an.currentAnimation)
 		   << "\", \"isPlaying\": " << (an.isPlaying ? "true" : "false") << ", \"loop\": " << (an.loop ? "true" : "false") << ", \"speed\": [" << an.speed << "], \"time\": [" << an.time << "]}";
 	}
 	for (const auto& rb : o.rigidbodies) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		ss << "        {\"type\": \"Rigidbody\", \"enabled\": " << (rb.enabled ? "true" : "false") << ", \"velocity\": [" << rb.velocity.x << "," << rb.velocity.y << "," << rb.velocity.z
 		   << "], \"useGravity\": " << (rb.useGravity ? "true" : "false") << ", \"isKinematic\": " << (rb.isKinematic ? "true" : "false") << "}";
 	}
-	// ★追加: ParticleEmitterのシリアライズ
 	for (const auto& pe : o.particleEmitters) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		const auto& p = pe.emitter.params;
 		ss << "        {\"type\": \"ParticleEmitter\", \"enabled\": " << (pe.enabled ? "true" : "false") << ", \"isPlaying\": " << (pe.emitter.isPlaying ? "true" : "false")
-		   << ", \"emitRate\": " << p.emitRate << ", \"burstCount\": " << p.burstCount;
-		ss << ", \"lifeTime\": " << p.lifeTime << ", \"lifeTimeVariance\": " << p.lifeTimeVariance;
-		ss << ", \"startVelocity\": [" << p.startVelocity.x << "," << p.startVelocity.y << "," << p.startVelocity.z << "], \"velocityVariance\": [" << p.velocityVariance.x << ","
-		   << p.velocityVariance.y << "," << p.velocityVariance.z << "], \"acceleration\": [" << p.acceleration.x << "," << p.acceleration.y << "," << p.acceleration.z << "]";
-		ss << ", \"startSize\": [" << p.startSize.x << "," << p.startSize.y << "," << p.startSize.z << "], \"endSize\": [" << p.endSize.x << "," << p.endSize.y << "," << p.endSize.z << "]";
-		ss << ", \"startColor\": [" << p.startColor.x << "," << p.startColor.y << "," << p.startColor.z << "," << p.startColor.w << "], \"endColor\": [" << p.endColor.x << "," << p.endColor.y << ","
-		   << p.endColor.z << "," << p.endColor.w << "]";
-		ss << ", \"isAdditive\": " << (p.isAdditive ? "true" : "false");
-		ss << ", \"assetPath\": \"" << EscapeJson(pe.assetPath) << "\"";
-		ss << "}";
+		   << ", \"emitRate\": " << p.emitRate << ", \"burstCount\": " << p.burstCount << ", \"lifeTime\": " << p.lifeTime << ", \"lifeTimeVariance\": " << p.lifeTimeVariance
+		   << ", \"startVelocity\": [" << p.startVelocity.x << "," << p.startVelocity.y << "," << p.startVelocity.z << "], \"velocityVariance\": [" << p.velocityVariance.x << ","
+		   << p.velocityVariance.y << "," << p.velocityVariance.z << "], \"acceleration\": [" << p.acceleration.x << "," << p.acceleration.y << "," << p.acceleration.z << "]"
+		   << ", \"startSize\": [" << p.startSize.x << "," << p.startSize.y << "," << p.startSize.z << "], \"endSize\": [" << p.endSize.x << "," << p.endSize.y << "," << p.endSize.z << "]"
+		   << ", \"startColor\": [" << p.startColor.x << "," << p.startColor.y << "," << p.startColor.z << "," << p.startColor.w << "], \"endColor\": [" << p.endColor.x << "," << p.endColor.y << ","
+		   << p.endColor.z << "," << p.endColor.w << "], \"isAdditive\": " << (p.isAdditive ? "true" : "false") << ", \"assetPath\": \"" << EscapeJson(pe.assetPath) << "\"}";
 	}
 	for (const auto& gmc : o.gpuMeshColliders) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		ss << "        {\"type\": \"GpuMeshCollider\", \"enabled\": " << (gmc.enabled ? "true" : "false") << ", \"isTrigger\": " << (gmc.isTrigger ? "true" : "false")
 		   << ", \"collisionType\": " << (int)gmc.collisionType << ", \"meshPath\": \"" << EscapeJson(gmc.meshPath) << "\"}";
 	}
-	// ★追加: PlayerInput
 	for (const auto& pi : o.playerInputs) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		ss << "        {\"type\": \"PlayerInput\", \"enabled\": " << (pi.enabled ? "true" : "false") << "}";
 	}
-	// ★追加: CharacterMovement
 	for (const auto& cm : o.characterMovements) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		ss << "        {\"type\": \"CharacterMovement\", \"enabled\": " << (cm.enabled ? "true" : "false") << ", \"speed\": " << cm.speed << ", \"jumpPower\": " << cm.jumpPower
 		   << ", \"gravity\": " << cm.gravity << "}";
 	}
-	// ★追加: CameraTarget
 	for (const auto& ct : o.cameraTargets) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		ss << "        {\"type\": \"CameraTarget\", \"enabled\": " << (ct.enabled ? "true" : "false") << ", \"distance\": " << ct.distance << ", \"height\": " << ct.height
 		   << ", \"smoothSpeed\": " << ct.smoothSpeed << "}";
 	}
-	// ★追加: Light Components
 	for (const auto& dl : o.directionalLights) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"DirectionalLight\", \"enabled\": " << (dl.enabled ? "true" : "false") << ", \"color\": [" << dl.color.x << "," << dl.color.y << "," << dl.color.z
-		   << "], \"intensity\": " << dl.intensity << "}";
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"DirectionalLight\", \"enabled\": " << (dl.enabled ? "true" : "false") << ", \"color\": [" << dl.color.x << "," << dl.color.y << "," << dl.color.z << "], \"intensity\": " << dl.intensity << "}";
 	}
 	for (const auto& pl : o.pointLights) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"PointLight\", \"enabled\": " << (pl.enabled ? "true" : "false") << ", \"color\": [" << pl.color.x << "," << pl.color.y << "," << pl.color.z
-		   << "], \"intensity\": " << pl.intensity << ", \"range\": " << pl.range << ", \"atten\": [" << pl.atten.x << "," << pl.atten.y << "," << pl.atten.z << "]}";
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"PointLight\", \"enabled\": " << (pl.enabled ? "true" : "false") << ", \"color\": [" << pl.color.x << "," << pl.color.y << "," << pl.color.z << "], \"intensity\": " << pl.intensity << ", \"range\": " << pl.range << ", \"atten\": [" << pl.atten.x << "," << pl.atten.y << "," << pl.atten.z << "]}";
 	}
 	for (const auto& sl : o.spotLights) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"SpotLight\", \"enabled\": " << (sl.enabled ? "true" : "false") << ", \"color\": [" << sl.color.x << "," << sl.color.y << "," << sl.color.z
-		   << "], \"intensity\": " << sl.intensity << ", \"range\": " << sl.range << ", \"innerCos\": " << sl.innerCos << ", \"outerCos\": " << sl.outerCos << ", \"atten\": [" << sl.atten.x << ","
-		   << sl.atten.y << "," << sl.atten.z << "]}";
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"SpotLight\", \"enabled\": " << (sl.enabled ? "true" : "false") << ", \"color\": [" << sl.color.x << "," << sl.color.y << "," << sl.color.z << "], \"intensity\": " << sl.intensity << ", \"range\": " << sl.range << ", \"innerCos\": " << sl.innerCos << ", \"outerCos\": " << sl.outerCos << ", \"atten\": [" << sl.atten.x << "," << sl.atten.y << "," << sl.atten.z << "]}";
 	}
-	// ★追加: AudioSource
 	for (const auto& as : o.audioSources) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"AudioSource\", \"enabled\": " << (as.enabled ? "true" : "false") << ", \"soundPath\": \"" << EscapeJson(as.soundPath) << "\", \"volume\": " << as.volume
-		   << ", \"loop\": " << (as.loop ? "true" : "false") << ", \"playOnStart\": " << (as.playOnStart ? "true" : "false") << ", \"is3D\": " << (as.is3D ? "true" : "false")
-		   << ", \"maxDistance\": " << as.maxDistance << "}";
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"AudioSource\", \"enabled\": " << (as.enabled ? "true" : "false") << ", \"soundPath\": \"" << EscapeJson(as.soundPath) << "\", \"volume\": " << as.volume << ", \"loop\": " << (as.loop ? "true" : "false") << ", \"playOnStart\": " << (as.playOnStart ? "true" : "false") << ", \"is3D\": " << (as.is3D ? "true" : "false") << ", \"maxDistance\": " << as.maxDistance << "}";
 	}
-	// ★追加: AudioListener
 	for (const auto& al : o.audioListeners) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		ss << "        {\"type\": \"AudioListener\", \"enabled\": " << (al.enabled ? "true" : "false") << "}";
 	}
-	// ★追加: Hitbox
 	for (const auto& hb : o.hitboxes) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"Hitbox\", \"enabled\": " << (hb.enabled ? "true" : "false") << ", \"center\": [" << hb.center.x << "," << hb.center.y << "," << hb.center.z << "], \"size\": ["
-		   << hb.size.x << "," << hb.size.y << "," << hb.size.z << "], \"damage\": " << hb.damage << ", \"isActive\": " << (hb.isActive ? "true" : "false") << ", \"tag\": \"" << EscapeJson(hb.tag)
-		   << "\"}";
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"Hitbox\", \"enabled\": " << (hb.enabled ? "true" : "false") << ", \"center\": [" << hb.center.x << "," << hb.center.y << "," << hb.center.z << "], \"size\": [" << hb.size.x << "," << hb.size.y << "," << hb.size.z << "], \"damage\": " << hb.damage << ", \"isActive\": " << (hb.isActive ? "true" : "false") << ", \"tag\": \"" << EscapeJson(hb.tag) << "\"}";
 	}
-	// ★追加: Hurtbox
 	for (const auto& hb : o.hurtboxes) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"Hurtbox\", \"enabled\": " << (hb.enabled ? "true" : "false") << ", \"center\": [" << hb.center.x << "," << hb.center.y << "," << hb.center.z << "], \"size\": ["
-		   << hb.size.x << "," << hb.size.y << "," << hb.size.z << "], \"tag\": \"" << EscapeJson(hb.tag) << "\", \"damageMultiplier\": " << hb.damageMultiplier << "}";
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"Hurtbox\", \"enabled\": " << (hb.enabled ? "true" : "false") << ", \"center\": [" << hb.center.x << "," << hb.center.y << "," << hb.center.z << "], \"size\": [" << hb.size.x << "," << hb.size.y << "," << hb.size.z << "], \"tag\": \"" << EscapeJson(hb.tag) << "\", \"damageMultiplier\": " << hb.damageMultiplier << "}";
 	}
-	// ★追加: Health
 	for (const auto& hc : o.healths) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"Health\", \"enabled\": " << (hc.enabled ? "true" : "false") << ", \"hp\": " << hc.hp << ", \"maxHp\": " << hc.maxHp << ", \"stamina\": " << hc.stamina
-		   << ", \"maxStamina\": " << hc.maxStamina << ", \"invincibleTime\": " << hc.invincibleTime << ", \"isDead\": " << (hc.isDead ? "true" : "false") << "}";
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"Health\", \"enabled\": " << (hc.enabled ? "true" : "false") << ", \"hp\": " << hc.hp << ", \"maxHp\": " << hc.maxHp << ", \"stamina\": " << hc.stamina << ", \"maxStamina\": " << hc.maxStamina << ", \"invincibleTime\": " << hc.invincibleTime << ", \"isDead\": " << (hc.isDead ? "true" : "false") << "}";
 	}
-	// ★追加: Script
 	for (const auto& sc : o.scripts) {
-		if (!first)
-			ss << ",\n";
-		first = false;
+		if (!first) ss << ",\n"; first = false;
 		ss << "        {\"type\": \"Script\", \"enabled\": " << (sc.enabled ? "true" : "false") << ", \"scriptPath\": \"" << EscapeJson(sc.scriptPath) << "\"}";
 	}
-	// ★追加: UI Components
 	for (const auto& rt : o.rectTransforms) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"RectTransform\", \"enabled\": " << (rt.enabled ? "true" : "false") << ", \"pos\": [" << rt.pos.x << "," << rt.pos.y << "], \"size\": [" << rt.size.x << ","
-		   << rt.size.y << "], \"anchor\": [" << rt.anchor.x << "," << rt.anchor.y << "], \"pivot\": [" << rt.pivot.x << "," << rt.pivot.y << "], \"rotation\": " << rt.rotation << "}";
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"RectTransform\", \"enabled\": " << (rt.enabled ? "true" : "false") << ", \"pos\": [" << rt.pos.x << "," << rt.pos.y << "], \"size\": [" << rt.size.x << "," << rt.size.y << "], \"anchor\": [" << rt.anchor.x << "," << rt.anchor.y << "], \"pivot\": [" << rt.pivot.x << "," << rt.pivot.y << "], \"rotation\": " << rt.rotation << "}";
 	}
 	for (const auto& img : o.images) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"UIImage\", \"enabled\": " << (img.enabled ? "true" : "false") << ", \"texturePath\": \"" << EscapeJson(img.texturePath) << "\", \"color\": [" << img.color.x << ","
-		   << img.color.y << "," << img.color.z << "," << img.color.w << "]}";
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"UIImage\", \"enabled\": " << (img.enabled ? "true" : "false") << ", \"texturePath\": \"" << EscapeJson(img.texturePath) << "\", \"color\": [" << img.color.x << "," << img.color.y << "," << img.color.z << "," << img.color.w << "]}";
 	}
 	for (const auto& txt : o.texts) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"UIText\", \"enabled\": " << (txt.enabled ? "true" : "false") << ", \"text\": \"" << EscapeJson(txt.text) << "\", \"fontSize\": " << txt.fontSize << ", \"color\": ["
-		   << txt.color.x << "," << txt.color.y << "," << txt.color.z << "," << txt.color.w << "]}";
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"UIText\", \"enabled\": " << (txt.enabled ? "true" : "false") << ", \"text\": \"" << EscapeJson(txt.text) << "\", \"fontSize\": " << txt.fontSize << ", \"color\": [" << txt.color.x << "," << txt.color.y << "," << txt.color.z << "," << txt.color.w << "]}";
 	}
 	for (const auto& btn : o.buttons) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"UIButton\", \"enabled\": " << (btn.enabled ? "true" : "false") << ", \"normalColor\": [" << btn.normalColor.x << "," << btn.normalColor.y << ","
-		   << btn.normalColor.z << "," << btn.normalColor.w << "], \"hoverColor\": [" << btn.hoverColor.x << "," << btn.hoverColor.y << "," << btn.hoverColor.z << "," << btn.hoverColor.w
-		   << "], \"pressedColor\": [" << btn.pressedColor.x << "," << btn.pressedColor.y << "," << btn.pressedColor.z << "," << btn.pressedColor.w << "]}";
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"UIButton\", \"enabled\": " << (btn.enabled ? "true" : "false") << ", \"normalColor\": [" << btn.normalColor.x << "," << btn.normalColor.y << "," << btn.normalColor.z << "," << btn.normalColor.w << "], \"hoverColor\": [" << btn.hoverColor.x << "," << btn.hoverColor.y << "," << btn.hoverColor.z << "," << btn.hoverColor.w << "], \"pressedColor\": [" << btn.pressedColor.x << "," << btn.pressedColor.y << "," << btn.pressedColor.z << "," << btn.pressedColor.w << "]}";
 	}
-
 	for (const auto& rv : o.rivers) {
-		if (!first)
-			ss << ",\n";
-		first = false;
-		ss << "        {\"type\": \"River\", \"enabled\": " << (rv.enabled ? "true" : "false") << ", \"width\": " << rv.width << ", \"flowSpeed\": " << rv.flowSpeed << ", \"uvScale\": " << rv.uvScale
-		   << ", \"texture\": \"" << rv.texturePath << "\", \"points\": [";
-		for (size_t i = 0; i < rv.points.size(); ++i) {
-			ss << rv.points[i].x << "," << rv.points[i].y << "," << rv.points[i].z << (i == rv.points.size() - 1 ? "" : ",");
-		}
+		if (!first) ss << ",\n"; first = false;
+		ss << "        {\"type\": \"River\", \"enabled\": " << (rv.enabled ? "true" : "false") << ", \"width\": " << rv.width << ", \"flowSpeed\": " << rv.flowSpeed << ", \"uvScale\": " << rv.uvScale << ", \"texture\": \"" << rv.texturePath << "\", \"points\": [";
+		for (size_t i = 0; i < rv.points.size(); ++i) { ss << rv.points[i].x << "," << rv.points[i].y << "," << rv.points[i].z << (i == rv.points.size() - 1 ? "" : ","); }
 		ss << "]}";
 	}
 	ss << "\n      ]\n";
@@ -385,236 +438,38 @@ static std::string SerializeSceneObject(const SceneObject& o) {
 	return ss.str();
 }
 
-std::string EditorUI::GetUnifiedProjectPath(const std::string& path) {
-	std::string absPath = path;
-	if (absPath.length() >= 2 && (absPath[1] == ':' || absPath[0] == '/' || absPath[0] == '\\')) {
-		return absPath; // 既に絶対パス
-	}
-
-	char exePath[MAX_PATH] = {0};
-	::GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-	std::filesystem::path currentP = std::filesystem::path(exePath).parent_path();
-	std::filesystem::path exeDir = currentP; // フォールバック用に保存
-
-	// Engineフォルダを探す
-	while (currentP.has_parent_path() && currentP.filename() != "Engine") {
-		auto parent = currentP.parent_path();
-		if (parent == currentP) { // ルートディレクトリに到達（無限ループ防止）
-			break;
-		}
-		currentP = parent;
-	}
-
-	if (currentP.filename() == "Engine") {
-		std::filesystem::path projectDir = currentP / "TD_Engine";
-		return (projectDir / path).string();
-	}
-
-	// フォールバック: 実行ファイルのあるディレクトリを基準とする
-	return (exeDir / path).string();
-}
-
 void EditorUI::SaveScene(GameScene* scene, const std::string& path) {
-	if (!scene)
-		return;
-
+	if (!scene) return;
 	std::string absPath = GetUnifiedProjectPath(path);
-
 	std::ofstream f(absPath);
-	if (!f.is_open()) {
-		LogError("Save failed: " + absPath);
-		return;
-	}
-	f << "{\n  \"settings\": {\n";
-	auto* r = Engine::Renderer::GetInstance();
-	auto pp = r->GetPostProcessParams();
-	f << "    \"postProcessEnabled\": " << (r->GetPostProcessEnabled() ? "true" : "false") << ",\n";
+	if (!f.is_open()) return;
+	f << "{\n";
+	f << "  \"settings\": {\n";
+	auto* renderer = Engine::Renderer::GetInstance();
+	f << "    \"postProcessEnabled\": " << (renderer->GetPostProcessEnabled() ? "true" : "false") << ",\n";
+	auto pp = renderer->GetPostProcessParams();
 	f << "    \"vignette\": " << pp.vignette << ",\n";
 	f << "    \"distortion\": " << pp.distortion << ",\n";
 	f << "    \"noiseStrength\": " << pp.noiseStrength << ",\n";
 	f << "    \"chromaShift\": " << pp.chromaShift << ",\n";
 	f << "    \"scanline\": " << pp.scanline << "\n";
 	f << "  },\n";
+
 	f << "  \"objects\": [\n";
-
-	// ★追加: Gitでの競合(コンフリクト)を防ぐため、オブジェクトを名前順にソートして保存する。
-	std::vector<SceneObject> sortedObjects = scene->objects_;
-	std::stable_sort(sortedObjects.begin(), sortedObjects.end(), [](const SceneObject& a, const SceneObject& b) { return a.name < b.name; });
-
-	for (size_t i = 0; i < sortedObjects.size(); ++i) {
-		if (i > 0)
-			f << ",\n";
-		f << SerializeSceneObject(sortedObjects[i]);
+	bool first = true;
+	for (const auto& obj : scene->objects_) {
+		if (!first) f << ",\n"; first = false;
+		f << SerializeSceneObject(obj);
 	}
-	f << "\n  ]\n}\n";
+	f << "\n  ]\n";
+	f << "}\n";
 	f.close();
-	Log("Scene saved: " + path + " (" + std::to_string(scene->objects_.size()) + " objects)");
+	Log("Scene saved: " + path);
 }
 
-// ====== JSON Load ======
-static std::string UnescapeJson(const std::string& s) {
-	std::string o;
-	for (size_t i = 0; i < s.size(); ++i) {
-		if (s[i] == '\\' && i + 1 < s.size()) {
-			o += s[i + 1];
-			i++;
-		} else {
-			o += s[i];
-		}
-	}
-	return o;
-}
-
-static std::string ExtractString(const std::string& block, const std::string& key) {
-	auto pos = block.find("\"" + key + "\"");
-	if (pos == std::string::npos)
-		return "";
-	auto q1 = block.find("\"", block.find(":", pos) + 1);
-	if (q1 == std::string::npos)
-		return "";
-	size_t q2 = q1 + 1;
-	while (q2 < block.size()) {
-		if (block[q2] == '\\')
-			q2 += 2;
-		else if (block[q2] == '"')
-			break;
-		else
-			q2++;
-	}
-	if (q2 >= block.size())
-		return "";
-	return UnescapeJson(block.substr(q1 + 1, q2 - q1 - 1));
-}
-
-static size_t FindBlockEnd(const std::string& str, size_t startPos) {
-	int depth = 0;
-	bool inString = false;
-	bool escape = false;
-
-	for (size_t i = startPos; i < str.size(); ++i) {
-		char c = str[i];
-		if (escape) {
-			escape = false;
-			continue;
-		}
-		if (c == '\\') {
-			escape = true;
-			continue;
-		}
-		if (c == '"') {
-			inString = !inString;
-			continue;
-		}
-
-		if (!inString) {
-			if (c == '{' || c == '[')
-				depth++;
-			else if (c == '}' || c == ']') {
-				depth--;
-				if (depth <= 0)
-					return i;
-			}
-		}
-	}
-	return std::string::npos;
-}
-
-static std::vector<std::string> ExtractStringArray(const std::string& block, const std::string& key) {
-	std::vector<std::string> res;
-	auto pos = block.find("\"" + key + "\"");
-	if (pos == std::string::npos)
-		return res;
-	auto arrStart = block.find("[", pos);
-	if (arrStart == std::string::npos)
-		return res;
-	auto arrEnd = FindBlockEnd(block, arrStart);
-	if (arrEnd == std::string::npos)
-		return res;
-
-	std::string ab = block.substr(arrStart + 1, arrEnd - arrStart - 1);
-	size_t cur = 0;
-	while (cur < ab.size()) {
-		auto q1 = ab.find("\"", cur);
-		if (q1 == std::string::npos)
-			break;
-		size_t q2 = q1 + 1;
-		while (q2 < ab.size()) {
-			if (ab[q2] == '\\')
-				q2 += 2;
-			else if (ab[q2] == '"')
-				break;
-			else
-				q2++;
-		}
-		if (q2 >= ab.size())
-			break;
-		res.push_back(UnescapeJson(ab.substr(q1 + 1, q2 - q1 - 1)));
-		cur = q2 + 1;
-	}
-	return res;
-}
-static std::vector<float> ExtractArray(const std::string& block, const std::string& key) {
-	std::vector<float> r;
-	auto pos = block.find("\"" + key + "\"");
-	if (pos == std::string::npos)
-		return r;
-	auto b = block.find("[", pos);
-	auto e = block.find("]", b);
-	if (b == std::string::npos || e == std::string::npos)
-		return r;
-	std::istringstream ss(block.substr(b + 1, e - b - 1));
-	float v;
-	while (ss >> v) {
-		r.push_back(v);
-		char c;
-		ss >> c;
-	}
-	return r;
-}
-
-static float ExtractFloat(const std::string& block, const std::string& key, float defaultVal) {
-	auto pos = block.find("\"" + key + "\"");
-	if (pos == std::string::npos)
-		return defaultVal;
-	auto col = block.find(":", pos);
-	if (col == std::string::npos)
-		return defaultVal;
-	std::string s = block.substr(col + 1);
-	// Skip spaces, commas
-	size_t start = 0;
-	while (start < s.size() && (std::isspace((unsigned char)s[start]) || s[start] == ':' || s[start] == ','))
-		start++;
-	return (float)std::atof(s.c_str() + start);
-}
-
-static uint32_t ExtractUint(const std::string& block, const std::string& key, uint32_t defaultVal) {
-	auto pos = block.find("\"" + key + "\"");
-	if (pos == std::string::npos)
-		return defaultVal;
-	auto col = block.find(":", pos);
-	if (col == std::string::npos)
-		return defaultVal;
-	std::string s = block.substr(col + 1);
-	size_t start = 0;
-	while (start < s.size() && (std::isspace((unsigned char)s[start]) || (unsigned char)s[start] == ':' || (unsigned char)s[start] == ','))
-		start++;
-	if (start >= s.size() || !isdigit((unsigned char)s[start]))
-		return defaultVal;
-	return (uint32_t)std::stoul(s.substr(start));
-}
-
-static bool ExtractBool(const std::string& block, const std::string& key, bool defaultVal) {
-	auto pos = block.find("\"" + key + "\"");
-	if (pos == std::string::npos)
-		return defaultVal;
-	if (block.find("true", pos) != std::string::npos && block.find("true", pos) < pos + 30)
-		return true;
-	if (block.find("false", pos) != std::string::npos && block.find("false", pos) < pos + 30)
-		return false;
-	return defaultVal;
-}
-
+// ====== Component Parsing (Shared) ======
 static void ParseComponents(SceneObject& obj, const std::string& block, Engine::Renderer* renderer) {
+
 	auto compStart = block.find("\"components\"");
 	if (compStart == std::string::npos)
 		return;
@@ -1424,7 +1279,9 @@ static int HitTestGizmoAxis(DirectX::XMVECTOR rayOrig, DirectX::XMVECTOR rayDir,
 	}
 }
 
-// ====== Main Show ======
+// ====== Level 1: ImGui UI Implementation ======
+#ifdef USE_IMGUI
+
 void EditorUI::Show(Engine::Renderer* renderer, GameScene* gameScene) {
 	globalTime += ImGui::GetIO().DeltaTime;
 	ImGuiIO& io = ImGui::GetIO();
@@ -1452,7 +1309,6 @@ void EditorUI::Show(Engine::Renderer* renderer, GameScene* gameScene) {
 
 	// ★追加: Play Mode Monitor
 	ShowPlayModeMonitor(gameScene);
-	ShowPlayModeMonitor(gameScene); // ★追加: Play Mode Monitor
 
 	// ====== Menu Bar ======
 	if (ImGui::BeginMenuBar()) {
@@ -1924,7 +1780,8 @@ void EditorUI::Show(Engine::Renderer* renderer, GameScene* gameScene) {
 				}
 
 			EndClickProcessing:;
-			} // if (ImGui::IsMouseClicked(Left)) の終了
+			} 
+		// insideImage の終了をここから削除し、下へ移動
 
 			// --- ★ 右クリック (Ctrl押下時) -> オブジェクト即時削除 ---
 			if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && io.KeyCtrl) {
@@ -1994,477 +1851,406 @@ void EditorUI::Show(Engine::Renderer* renderer, GameScene* gameScene) {
 					     }});
 					Log("Deleted object: " + deletedObj.name);
 				}
-			} // if (ImGui::IsMouseClicked(Right)) の終了
-		} // ★ 追加: if (insideImage) の終了
+			} 
+		} // if (insideImage) の終了
 
-		// --- 笘・繧ｮ繧ｺ繝｢霆ｸ繝峨Λ繝・げ荳ｭ ---
-		if (gizmoDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-			ImVec2 delta = ImVec2(mousePos.x - gizmoDragStartMouse.x, mousePos.y - gizmoDragStartMouse.y);
-			for (int idx : gameScene->selectedIndices_) {
-				if (idx >= 0 && idx < (int)gameScene->objects_.size() && dragStartTransforms.count(idx)) {
-					auto& obj = gameScene->objects_[idx];
-					auto initT = dragStartTransforms[idx];
-					if (currentGizmoMode == GizmoMode::Translate) {
-						float s = 0.02f;
-						float dx = (gizmoDragAxis == 0) ? delta.x * s : 0;
-						float dy = (gizmoDragAxis == 1) ? -delta.y * s : 0;
-						float dz = (gizmoDragAxis == 2) ? delta.x * s : 0;
-						// 繝ｭ繝ｼ繧ｫ繝ｫ霆ｸ縺ｫ豐ｿ縺｣縺ｦ遘ｻ蜍輔☆繧・
-						auto rotMat = DirectX::XMMatrixRotationRollPitchYaw(initT.rotate.x, initT.rotate.y, initT.rotate.z);
-						DirectX::XMVECTOR moveV = DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(dx, dy, dz, 0), rotMat);
-						DirectX::XMFLOAT3 moveF;
-						DirectX::XMStoreFloat3(&moveF, moveV);
-						obj.translate = DirectX::XMFLOAT3(initT.translate.x + moveF.x, initT.translate.y + moveF.y, initT.translate.z + moveF.z);
-					} else if (currentGizmoMode == GizmoMode::Rotate) {
-						float s = 0.01f;
-						auto nr = initT.rotate;
-						if (gizmoDragAxis == 0)
-							nr.x += delta.y * s;
-						else if (gizmoDragAxis == 1)
-							nr.y += delta.x * s;
-						else
-							nr.z += delta.x * s;
-						obj.rotate = DirectX::XMFLOAT3(nr.x, nr.y, nr.z);
-					} else {
-						float s = 0.01f;
-						auto ns = initT.scale;
-						if (gizmoDragAxis == 0)
-							ns.x += delta.x * s;
-						else if (gizmoDragAxis == 1)
-							ns.y -= delta.y * s;
-						else
-							ns.z += delta.x * s;
-						if (ns.x < 0.01f)
-							ns.x = 0.01f;
-						if (ns.y < 0.01f)
-							ns.y = 0.01f;
-						if (ns.z < 0.01f)
-							ns.z = 0.01f;
-						obj.scale = DirectX::XMFLOAT3(ns.x, ns.y, ns.z);
+			// --- 笘・繧ｮ繧ｺ繝｢霆ｸ繝峨Λ繝・げ荳ｭ ---
+			if (gizmoDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+				ImVec2 delta = ImVec2(mousePos.x - gizmoDragStartMouse.x, mousePos.y - gizmoDragStartMouse.y);
+				for (int idx : gameScene->selectedIndices_) {
+					if (idx >= 0 && idx < (int)gameScene->objects_.size() && dragStartTransforms.count(idx)) {
+						auto& obj = gameScene->objects_[idx];
+						auto initT = dragStartTransforms[idx];
+						if (currentGizmoMode == GizmoMode::Translate) {
+							float s = 0.02f;
+							float dx = (gizmoDragAxis == 0) ? delta.x * s : 0;
+							float dy = (gizmoDragAxis == 1) ? -delta.y * s : 0;
+							float dz = (gizmoDragAxis == 2) ? delta.x * s : 0;
+							// 繝ｭ繝ｼ繧ｫ繝ｫ霆ｸ縺ｫ豐ｿ縺｣縺ｦ遘ｻ蜍輔☆繧・
+							auto rotMat = DirectX::XMMatrixRotationRollPitchYaw(initT.rotate.x, initT.rotate.y, initT.rotate.z);
+							DirectX::XMVECTOR moveV = DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(dx, dy, dz, 0), rotMat);
+							DirectX::XMFLOAT3 moveF;
+							DirectX::XMStoreFloat3(&moveF, moveV);
+							obj.translate = DirectX::XMFLOAT3(initT.translate.x + moveF.x, initT.translate.y + moveF.y, initT.translate.z + moveF.z);
+						} else if (currentGizmoMode == GizmoMode::Rotate) {
+							float s = 0.01f;
+							auto nr = initT.rotate;
+							if (gizmoDragAxis == 0)
+								nr.x += delta.y * s;
+							else if (gizmoDragAxis == 1)
+								nr.y += delta.x * s;
+							else
+								nr.z += delta.x * s;
+							obj.rotate = DirectX::XMFLOAT3(nr.x, nr.y, nr.z);
+						} else {
+							float s = 0.01f;
+							auto ns = initT.scale;
+							if (gizmoDragAxis == 0)
+								ns.x += delta.x * s;
+							else if (gizmoDragAxis == 1)
+								ns.y -= delta.y * s;
+							else
+								ns.z += delta.x * s;
+							if (ns.x < 0.01f)
+								ns.x = 0.01f;
+							if (ns.y < 0.01f)
+								ns.y = 0.01f;
+							if (ns.z < 0.01f)
+								ns.z = 0.01f;
+							obj.scale = DirectX::XMFLOAT3(ns.x, ns.y, ns.z);
+						}
 					}
 				}
 			}
-		}
 
-		// --- 笘・閾ｪ逕ｱ繝峨Λ繝・げ荳ｭ・医ぐ繧ｺ繝｢縺ｧ縺ｯ縺ｪ縺上が繝悶ず繧ｧ繧ｯ繝育峩謗･繝峨Λ繝・げ・・--
-		if (objectDragging && !gizmoDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-			ImVec2 delta = ImVec2(mousePos.x - gizmoDragStartMouse.x, mousePos.y - gizmoDragStartMouse.y);
-			if (std::fabs(delta.x) > 2.0f || std::fabs(delta.y) > 2.0f) { // 繝・ャ繝峨だ繝ｼ繝ｳ
-				auto camR2 = gameScene->camera_.Rotation();
-				auto rotMat = DirectX::XMMatrixRotationRollPitchYaw(camR2.x, camR2.y, camR2.z);
-				DirectX::XMFLOAT3 right = {1, 0, 0}, up = {0, 1, 0};
-				DirectX::XMVECTOR rightV = DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&right), rotMat);
-				DirectX::XMVECTOR upV = DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&up), rotMat);
+			// --- 笘・閾ｪ逕ｱ繝峨Λ繝・げ荳ｭ・医ぐ繧ｺ繝｢縺ｧ縺ｯ縺ｪ縺上が繝悶ず繧ｧ繧ｯ繝育峩謗･繝峨Λ繝・げ・・--
+			if (objectDragging && !gizmoDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+				ImVec2 delta = ImVec2(mousePos.x - gizmoDragStartMouse.x, mousePos.y - gizmoDragStartMouse.y);
+				if (std::fabs(delta.x) > 2.0f || std::fabs(delta.y) > 2.0f) { // 繝・ャ繝峨だ繝ｼ繝ｳ
+					auto camR2 = gameScene->camera_.Rotation();
+					auto rotMat = DirectX::XMMatrixRotationRollPitchYaw(camR2.x, camR2.y, camR2.z);
+					DirectX::XMFLOAT3 right = {1, 0, 0}, up = {0, 1, 0};
+					DirectX::XMVECTOR rightV = DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&right), rotMat);
+					DirectX::XMVECTOR upV = DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&up), rotMat);
 
-				float sensitivity = 0.015f;
-				DirectX::XMVECTOR moveV = DirectX::XMVectorAdd(DirectX::XMVectorScale(rightV, delta.x * sensitivity), DirectX::XMVectorScale(upV, -delta.y * sensitivity));
-				DirectX::XMFLOAT3 moveF;
-				DirectX::XMStoreFloat3(&moveF, moveV);
+					float sensitivity = 0.015f;
+					DirectX::XMVECTOR moveV = DirectX::XMVectorAdd(DirectX::XMVectorScale(rightV, delta.x * sensitivity), DirectX::XMVectorScale(upV, -delta.y * sensitivity));
+					DirectX::XMFLOAT3 moveF;
+					DirectX::XMStoreFloat3(&moveF, moveV);
+
+					for (int idx : gameScene->selectedIndices_) {
+						if (idx >= 0 && idx < (int)gameScene->objects_.size() && dragStartTransforms.count(idx)) {
+							auto initT = dragStartTransforms[idx];
+							gameScene->objects_[idx].translate = DirectX::XMFLOAT3(initT.translate.x + moveF.x, initT.translate.y + moveF.y, initT.translate.z + moveF.z);
+						}
+					}
+				}
+			}
+
+			// --- 笘・繝峨Λ繝・げ邨ゆｺ・(Undo逋ｻ骭ｲ) ---
+			if ((gizmoDragging || objectDragging) && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+				std::vector<int> targetIndices;
+				std::vector<Engine::Transform> oldTransforms;
+				std::vector<Engine::Transform> newTransforms;
 
 				for (int idx : gameScene->selectedIndices_) {
 					if (idx >= 0 && idx < (int)gameScene->objects_.size() && dragStartTransforms.count(idx)) {
-						auto initT = dragStartTransforms[idx];
-						gameScene->objects_[idx].translate = DirectX::XMFLOAT3(initT.translate.x + moveF.x, initT.translate.y + moveF.y, initT.translate.z + moveF.z);
+						targetIndices.push_back(idx);
+						oldTransforms.push_back(dragStartTransforms[idx]);
+						newTransforms.push_back(gameScene->objects_[idx].GetTransform());
 					}
 				}
-			}
-		}
-
-		// --- 笘・繝峨Λ繝・げ邨ゆｺ・(Undo逋ｻ骭ｲ) ---
-		if ((gizmoDragging || objectDragging) && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-			std::vector<int> targetIndices;
-			std::vector<Engine::Transform> oldTransforms;
-			std::vector<Engine::Transform> newTransforms;
-
-			for (int idx : gameScene->selectedIndices_) {
-				if (idx >= 0 && idx < (int)gameScene->objects_.size() && dragStartTransforms.count(idx)) {
-					targetIndices.push_back(idx);
-					oldTransforms.push_back(dragStartTransforms[idx]);
-					newTransforms.push_back(gameScene->objects_[idx].GetTransform());
-				}
-			}
-			if (!targetIndices.empty()) {
-				PushUndo(
-				    {"Transform",
-				     [gameScene, targetIndices, oldTransforms]() {
-					     for (size_t i = 0; i < targetIndices.size(); ++i) {
-						     int idx = targetIndices[i];
-						     if (idx < (int)gameScene->objects_.size()) {
-							     gameScene->objects_[idx].translate = DirectX::XMFLOAT3(oldTransforms[i].translate.x, oldTransforms[i].translate.y, oldTransforms[i].translate.z);
-							     gameScene->objects_[idx].rotate = DirectX::XMFLOAT3(oldTransforms[i].rotate.x, oldTransforms[i].rotate.y, oldTransforms[i].rotate.z);
-							     gameScene->objects_[idx].scale = DirectX::XMFLOAT3(oldTransforms[i].scale.x, oldTransforms[i].scale.y, oldTransforms[i].scale.z);
+				if (!targetIndices.empty()) {
+					PushUndo(
+					    {"Transform",
+					     [gameScene, targetIndices, oldTransforms]() {
+						     for (size_t i = 0; i < targetIndices.size(); ++i) {
+							     int idx = targetIndices[i];
+							     if (idx < (int)gameScene->objects_.size()) {
+								     gameScene->objects_[idx].translate = DirectX::XMFLOAT3(oldTransforms[i].translate.x, oldTransforms[i].translate.y, oldTransforms[i].translate.z);
+								     gameScene->objects_[idx].rotate = DirectX::XMFLOAT3(oldTransforms[i].rotate.x, oldTransforms[i].rotate.y, oldTransforms[i].rotate.z);
+								     gameScene->objects_[idx].scale = DirectX::XMFLOAT3(oldTransforms[i].scale.x, oldTransforms[i].scale.y, oldTransforms[i].scale.z);
+							     }
 						     }
-					     }
-				     },
-				     [gameScene, targetIndices, newTransforms]() {
-					     for (size_t i = 0; i < targetIndices.size(); ++i) {
-						     int idx = targetIndices[i];
-						     if (idx < (int)gameScene->objects_.size()) {
-							     gameScene->objects_[idx].translate = DirectX::XMFLOAT3(newTransforms[i].translate.x, newTransforms[i].translate.y, newTransforms[i].translate.z);
-							     gameScene->objects_[idx].rotate = DirectX::XMFLOAT3(newTransforms[i].rotate.x, newTransforms[i].rotate.y, newTransforms[i].rotate.z);
-							     gameScene->objects_[idx].scale = DirectX::XMFLOAT3(newTransforms[i].scale.x, newTransforms[i].scale.y, newTransforms[i].scale.z);
+					     },
+					     [gameScene, targetIndices, newTransforms]() {
+						     for (size_t i = 0; i < targetIndices.size(); ++i) {
+							     int idx = targetIndices[i];
+							     if (idx < (int)gameScene->objects_.size()) {
+								     gameScene->objects_[idx].translate = DirectX::XMFLOAT3(newTransforms[i].translate.x, newTransforms[i].translate.y, newTransforms[i].translate.z);
+								     gameScene->objects_[idx].rotate = DirectX::XMFLOAT3(newTransforms[i].rotate.x, newTransforms[i].rotate.y, newTransforms[i].rotate.z);
+								     gameScene->objects_[idx].scale = DirectX::XMFLOAT3(newTransforms[i].scale.x, newTransforms[i].scale.y, newTransforms[i].scale.z);
+							     }
 						     }
-					     }
-				     }});
+					     }});
+				}
+				gizmoDragging = false;
+				gizmoDragAxis = -1;
+				objectDragging = false;
+				dragStartTransforms.clear();
 			}
-			gizmoDragging = false;
-			gizmoDragAxis = -1;
-			objectDragging = false;
-			dragStartTransforms.clear();
-		}
 
-		// --- 繧ｫ繝｡繝ｩ謫堺ｽ懶ｼ亥承繧ｯ繝ｪ繝・け・・---
-		auto camP = gameScene->camera_.Position();
-		auto camR = gameScene->camera_.Rotation();
-		if (ImGui::IsMouseDragging(ImGuiMouseButton_Right, 1.0f)) {
-			ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Right, 1.0f);
-			ImGui::ResetMouseDragDelta(ImGuiMouseButton_Right);
-			camR.y += d.x * 0.003f;
-			camR.x += d.y * 0.003f;
-			constexpr float lim = DirectX::XMConvertToRadians(89.0f);
-			if (camR.x > lim)
-				camR.x = lim;
-			if (camR.x < -lim)
-				camR.x = -lim;
-			gameScene->camera_.SetRotation(camR);
-		}
-		if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-			float sp = io.KeyShift ? 0.45f : 0.15f;
-			DirectX::XMFLOAT3 mv = {0, 0, 0};
-			if (ImGui::IsKeyDown(ImGuiKey_W))
-				mv.z += sp;
-			if (ImGui::IsKeyDown(ImGuiKey_S))
-				mv.z -= sp;
-			if (ImGui::IsKeyDown(ImGuiKey_A))
-				mv.x -= sp;
-			if (ImGui::IsKeyDown(ImGuiKey_D))
-				mv.x += sp;
-			if (ImGui::IsKeyDown(ImGuiKey_Q))
-				mv.y -= sp;
-			if (ImGui::IsKeyDown(ImGuiKey_E))
-				mv.y += sp;
-			auto r = DirectX::XMMatrixRotationRollPitchYaw(camR.x, camR.y, camR.z);
-			DirectX::XMStoreFloat3(&camP, DirectX::XMVectorAdd(DirectX::XMLoadFloat3(&camP), DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&mv), r)));
-			gameScene->camera_.SetPosition(camP);
-		}
-		float wh = io.MouseWheel;
-		if (std::fabs(wh) > 0.01f) {
-			float zs = io.KeyShift ? 3.f : 1.f;
-			auto r = DirectX::XMMatrixRotationRollPitchYaw(camR.x, camR.y, camR.z);
-			DirectX::XMFLOAT3 fw = {0, 0, 1};
-			DirectX::XMStoreFloat3(&camP, DirectX::XMVectorAdd(DirectX::XMLoadFloat3(&camP), DirectX::XMVectorScale(DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&fw), r), wh * zs)));
-			gameScene->camera_.SetPosition(camP);
-		}
+			// --- 繧ｫ繝｡繝ｩ謫堺ｽ懶ｼ亥承繧ｯ繝ｪ繝・け・・---
+			auto camP = gameScene->camera_.Position();
+			auto camR = gameScene->camera_.Rotation();
+			if (ImGui::IsMouseDragging(ImGuiMouseButton_Right, 1.0f)) {
+				ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Right, 1.0f);
+				ImGui::ResetMouseDragDelta(ImGuiMouseButton_Right);
+				camR.y += d.x * 0.003f;
+				camR.x += d.y * 0.003f;
+				constexpr float lim = DirectX::XMConvertToRadians(89.0f);
+				if (camR.x > lim)
+					camR.x = lim;
+				if (camR.x < -lim)
+					camR.x = -lim;
+				gameScene->camera_.SetRotation(camR);
+			}
+			if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+				float sp = io.KeyShift ? 0.45f : 0.15f;
+				DirectX::XMFLOAT3 mv = {0, 0, 0};
+				if (ImGui::IsKeyDown(ImGuiKey_W))
+					mv.z += sp;
+				if (ImGui::IsKeyDown(ImGuiKey_S))
+					mv.z -= sp;
+				if (ImGui::IsKeyDown(ImGuiKey_A))
+					mv.x -= sp;
+				if (ImGui::IsKeyDown(ImGuiKey_D))
+					mv.x += sp;
+				if (ImGui::IsKeyDown(ImGuiKey_Q))
+					mv.y -= sp;
+				if (ImGui::IsKeyDown(ImGuiKey_E))
+					mv.y += sp;
+				auto r = DirectX::XMMatrixRotationRollPitchYaw(camR.x, camR.y, camR.z);
+				DirectX::XMStoreFloat3(&camP, DirectX::XMVectorAdd(DirectX::XMLoadFloat3(&camP), DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&mv), r)));
+				gameScene->camera_.SetPosition(camP);
+			}
+			float wh = io.MouseWheel;
+			if (std::fabs(wh) > 0.01f) {
+				float zs = io.KeyShift ? 3.f : 1.f;
+				auto r = DirectX::XMMatrixRotationRollPitchYaw(camR.x, camR.y, camR.z);
+				DirectX::XMFLOAT3 fw = {0, 0, 1};
+				DirectX::XMStoreFloat3(&camP, DirectX::XMVectorAdd(DirectX::XMLoadFloat3(&camP), DirectX::XMVectorScale(DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&fw), r), wh * zs)));
+				gameScene->camera_.SetPosition(camP);
+			}
 
-		// UIギズモの描画と操作
-		uiHoveredAny = false;
-		if (gameScene && gameScene->selectedObjectIndex_ >= 0 && gameScene->selectedObjectIndex_ < (int)gameScene->objects_.size() && !gameScene->IsPlaying()) {
-			auto& selObj = gameScene->objects_[gameScene->selectedObjectIndex_];
-			if (!selObj.rectTransforms.empty()) {
-				// 解像度ズレを解消するため、バックバッファ解像度 (1920x1080) で計算してからスケーリングする
-				float kW = (float)Engine::WindowDX::kW;
-				float kH = (float)Engine::WindowDX::kH;
-				auto wr = UISystem::CalculateWorldRect(selObj, gameScene->objects_, kW, kH);
-				float scaleX = tW / kW;
-				float scaleY = tH / kH;
+			// UIギズモの描画と操作
+			uiHoveredAny = false;
+			uiHoveredHandle = -1;
+			if (gameScene && gameScene->selectedObjectIndex_ >= 0 && gameScene->selectedObjectIndex_ < (int)gameScene->objects_.size() && !gameScene->IsPlaying()) {
+				auto& selObj = gameScene->objects_[gameScene->selectedObjectIndex_];
+				if (!selObj.rectTransforms.empty()) {
+					float kW = (float)Engine::WindowDX::kW;
+					float kH = (float)Engine::WindowDX::kH;
+					auto wr = UISystem::CalculateWorldRect(selObj, gameScene->objects_, kW, kH);
+					float scaleX = tW / kW;
+					float scaleY = tH / kH;
 
-				float cx = gameImageMin.x + wr.x * scaleX;
-				float cy = gameImageMin.y + wr.y * scaleY;
-				float cw = wr.w * scaleX;
-				float ch = wr.h * scaleY;
+					float cx = gameImageMin.x + wr.x * scaleX;
+					float cy = gameImageMin.y + wr.y * scaleY;
+					float cw = wr.w * scaleX;
+					float ch = wr.h * scaleY;
 
-				ImDrawList* dl = ImGui::GetWindowDrawList();
-				ImU32 colLine = IM_COL32(50, 255, 50, 255);
-				ImU32 colHandle = IM_COL32(200, 255, 200, 255);
-				ImU32 colHandleHover = IM_COL32(255, 255, 255, 255);
-				ImU32 colHitbox = IM_COL32(255, 150, 50, 255);
-				ImU32 colHitHandle = IM_COL32(255, 180, 80, 255);
+					ImDrawList* dl = ImGui::GetWindowDrawList();
+					ImU32 colLine = IM_COL32(50, 255, 50, 255);
+					ImU32 colHandle = IM_COL32(200, 255, 200, 255);
+					ImU32 colHandleHover = IM_COL32(255, 255, 255, 255);
+					ImU32 colHitbox = IM_COL32(255, 150, 50, 255);
+					ImU32 colHitHandle = IM_COL32(255, 180, 80, 255);
 
-				// 枠線の描画 (Visual)
-				dl->AddRect(ImVec2(cx, cy), ImVec2(cx + cw, cy + ch), colLine, 0.0f, 0, 2.0f);
+					dl->AddRect(ImVec2(cx, cy), ImVec2(cx + cw, cy + ch), colLine, 0.0f, 0, 2.0f);
 
-				// ヒットボックス情報
-				float hbxX = cx, hbxY = cy, hbxW = cw, hbxH = ch;
-				bool hasButton = !selObj.buttons.empty();
-				if (hasButton) {
-					auto& btn = selObj.buttons[0];
-					hbxW = cw * btn.hitboxScale.x;
-					hbxH = ch * btn.hitboxScale.y;
-					hbxX = cx + (cw * 0.5f) + btn.hitboxOffset.x * scaleX - hbxW * 0.5f;
-					hbxY = cy + (ch * 0.5f) + btn.hitboxOffset.y * scaleY - hbxH * 0.5f;
-					// 枠線の描画 (Hitbox)
-					dl->AddRect(ImVec2(hbxX, hbxY), ImVec2(hbxX + hbxW, hbxY + hbxH), colHitbox, 0.0f, 0, 1.5f);
-				}
+					float hbxX = cx, hbxY = cy, hbxW = cw, hbxH = ch;
+					bool hasButton = !selObj.buttons.empty();
+					if (hasButton) {
+						auto& btn = selObj.buttons[0];
+						hbxW = cw * btn.hitboxScale.x;
+						hbxH = ch * btn.hitboxScale.y;
+						hbxX = cx + (cw * 0.5f) + btn.hitboxOffset.x * scaleX - hbxW * 0.5f;
+						hbxY = cy + (ch * 0.5f) + btn.hitboxOffset.y * scaleY - hbxH * 0.5f;
+						dl->AddRect(ImVec2(hbxX, hbxY), ImVec2(hbxX + hbxW, hbxY + hbxH), colHitbox, 0.0f, 0, 1.5f);
+					}
 
-				// ハンドルの定義: {x, y, cursor, type(0:Visual, 1:Hitbox)}
-				struct HandleDef {
-					float x, y;
-					ImGuiMouseCursor cursor;
-					int type;
-				};
-				std::vector<HandleDef> handles;
-					// Visual Handles (0-8)
-				handles.push_back({cx, cy, ImGuiMouseCursor_ResizeNWSE, 0});
-				handles.push_back({cx + cw * 0.5f, cy, ImGuiMouseCursor_ResizeNS, 0});
-				handles.push_back({cx + cw, cy, ImGuiMouseCursor_ResizeNESW, 0});
-				handles.push_back({cx + cw, cy + ch * 0.5f, ImGuiMouseCursor_ResizeEW, 0});
-				handles.push_back({cx + cw, cy + ch, ImGuiMouseCursor_ResizeNWSE, 0});
-				handles.push_back({cx + cw * 0.5f, cy + ch, ImGuiMouseCursor_ResizeNS, 0});
-				handles.push_back({cx, cy + ch, ImGuiMouseCursor_ResizeNESW, 0});
-				handles.push_back({cx, cy + ch * 0.5f, ImGuiMouseCursor_ResizeEW, 0});
-				handles.push_back({cx + cw * 0.5f, cy + ch * 0.5f, ImGuiMouseCursor_ResizeAll, 0});
+					struct HandleDef {
+						float x, y;
+						ImGuiMouseCursor cursor;
+						int type;
+					};
+					std::vector<HandleDef> handles;
+					handles.push_back({cx, cy, ImGuiMouseCursor_ResizeNWSE, 0});
+					handles.push_back({cx + cw * 0.5f, cy, ImGuiMouseCursor_ResizeNS, 0});
+					handles.push_back({cx + cw, cy, ImGuiMouseCursor_ResizeNESW, 0});
+					handles.push_back({cx + cw, cy + ch * 0.5f, ImGuiMouseCursor_ResizeEW, 0});
+					handles.push_back({cx + cw, cy + ch, ImGuiMouseCursor_ResizeNWSE, 0});
+					handles.push_back({cx + cw * 0.5f, cy + ch, ImGuiMouseCursor_ResizeNS, 0});
+					handles.push_back({cx, cy + ch, ImGuiMouseCursor_ResizeNESW, 0});
+					handles.push_back({cx, cy + ch * 0.5f, ImGuiMouseCursor_ResizeEW, 0});
+					handles.push_back({cx + cw * 0.5f, cy + ch * 0.5f, ImGuiMouseCursor_ResizeAll, 0});
 
-				// Hitbox Handles (9-17)
-				if (hasButton) {
-					handles.push_back({hbxX, hbxY, ImGuiMouseCursor_ResizeNWSE, 1});
-					handles.push_back({hbxX + hbxW * 0.5f, hbxY, ImGuiMouseCursor_ResizeNS, 1});
-					handles.push_back({hbxX + hbxW, hbxY, ImGuiMouseCursor_ResizeNESW, 1});
-					handles.push_back({hbxX + hbxW, hbxY + hbxH * 0.5f, ImGuiMouseCursor_ResizeEW, 1});
-					handles.push_back({hbxX + hbxW, hbxY + hbxH, ImGuiMouseCursor_ResizeNWSE, 1});
-					handles.push_back({hbxX + hbxW * 0.5f, hbxY + hbxH, ImGuiMouseCursor_ResizeNS, 1});
-					handles.push_back({hbxX, hbxY + hbxH, ImGuiMouseCursor_ResizeNESW, 1});
-					handles.push_back({hbxX, hbxY + hbxH * 0.5f, ImGuiMouseCursor_ResizeEW, 1});
-					handles.push_back({hbxX + hbxW * 0.5f, hbxY + hbxH * 0.5f, ImGuiMouseCursor_ResizeAll, 1});
-				}
+					if (hasButton) {
+						handles.push_back({hbxX, hbxY, ImGuiMouseCursor_ResizeNWSE, 1});
+						handles.push_back({hbxX + hbxW * 0.5f, hbxY, ImGuiMouseCursor_ResizeNS, 1});
+						handles.push_back({hbxX + hbxW, hbxY, ImGuiMouseCursor_ResizeNESW, 1});
+						handles.push_back({hbxX + hbxW, hbxY + hbxH * 0.5f, ImGuiMouseCursor_ResizeEW, 1});
+						handles.push_back({hbxX + hbxW, hbxY + hbxH, ImGuiMouseCursor_ResizeNWSE, 1});
+						handles.push_back({hbxX + hbxW * 0.5f, hbxY + hbxH, ImGuiMouseCursor_ResizeNS, 1});
+						handles.push_back({hbxX, hbxY + hbxH, ImGuiMouseCursor_ResizeNESW, 1});
+						handles.push_back({hbxX, hbxY + hbxH * 0.5f, ImGuiMouseCursor_ResizeEW, 1});
+						handles.push_back({hbxX + hbxW * 0.5f, hbxY + hbxH * 0.5f, ImGuiMouseCursor_ResizeAll, 1});
+					}
 
-				float handleSz = 6.0f;
-				bool hoveredAny = false;
-				int hoveredHandle = -1;
-				if (insideImage && !gizmoDragging && !objectDragging && !uiDragging) {
-					ImVec2 mpos = ImGui::GetMousePos();
-					float hitDetectRad = handleSz * 1.5f;
-					float bezelDetectWidth = 4.0f; // 枠線判定の太さ
+					float handleSz = 6.0f;
+					bool hoveredAny = false;
+					int hoveredHandle = -1;
+					ImVec2 mpos = mousePos; 
+
+					if (insideImage && !gizmoDragging && !objectDragging && !uiDragging) {
+						float hitDetectRad = handleSz * 1.5f;
+						float bezelDetectWidth = 4.0f;
+
+						for (int i = 0; i < (int)handles.size(); ++i) {
+							if (mpos.x >= handles[i].x - hitDetectRad && mpos.x <= handles[i].x + hitDetectRad && mpos.y >= handles[i].y - hitDetectRad && mpos.y <= handles[i].y + hitDetectRad) {
+								hoveredHandle = i;
+								hoveredAny = true;
+								break;
+							}
+						}
+
+						if (hoveredHandle == -1) {
+							bool onLeft = std::abs(mpos.x - cx) < bezelDetectWidth && mpos.y >= cy && mpos.y <= cy + ch;
+							bool onRight = std::abs(mpos.x - (cx + cw)) < bezelDetectWidth && mpos.y >= cy && mpos.y <= cy + ch;
+							bool onTop = std::abs(mpos.y - cy) < bezelDetectWidth && mpos.x >= cx && mpos.x <= cx + cw;
+							bool onBottom = std::abs(mpos.y - (cy + ch)) < bezelDetectWidth && mpos.x >= cx && mpos.x <= cx + cw;
+
+							if (onLeft && onTop) hoveredHandle = 0;
+							else if (onRight && onTop) hoveredHandle = 2;
+							else if (onRight && onBottom) hoveredHandle = 4;
+							else if (onLeft && onBottom) hoveredHandle = 6;
+							else if (onTop) hoveredHandle = 1;
+							else if (onRight) hoveredHandle = 3;
+							else if (onBottom) hoveredHandle = 5;
+							else if (onLeft) hoveredHandle = 7;
+
+							if (hoveredHandle == -1 && hasButton) {
+								bool hOnLeft = std::abs(mpos.x - hbxX) < bezelDetectWidth && mpos.y >= hbxY && mpos.y <= hbxY + hbxH;
+								bool hOnRight = std::abs(mpos.x - (hbxX + hbxW)) < bezelDetectWidth && mpos.y >= hbxY && mpos.y <= hbxY + hbxH;
+								bool hOnTop = std::abs(mpos.y - hbxY) < bezelDetectWidth && mpos.x >= hbxX && mpos.x <= hbxX + hbxW;
+								bool hOnBottom = std::abs(mpos.y - (hbxY + hbxH)) < bezelDetectWidth && mpos.x >= hbxX && mpos.x <= hbxX + hbxW;
+
+								if (hOnLeft && hOnTop) hoveredHandle = 9;
+								else if (hOnRight && hOnTop) hoveredHandle = 11;
+								else if (hOnRight && hOnBottom) hoveredHandle = 13;
+								else if (hOnLeft && hOnBottom) hoveredHandle = 15;
+								else if (hOnTop) hoveredHandle = 10;
+								else if (hOnRight) hoveredHandle = 12;
+								else if (hOnBottom) hoveredHandle = 14;
+								else if (hOnLeft) hoveredHandle = 16;
+							}
+							if (hoveredHandle != -1) hoveredAny = true;
+						}
+
+						if (hoveredHandle == -1) {
+							if (hasButton && mpos.x >= hbxX && mpos.x <= hbxX + hbxW && mpos.y >= hbxY && mpos.y <= hbxY + hbxH) {
+								hoveredHandle = 17;
+								hoveredAny = true;
+							} else if (mpos.x >= cx && mpos.x <= cx + cw && mpos.y >= cy && mpos.y <= cy + ch) {
+								hoveredHandle = 8;
+								hoveredAny = true;
+							}
+						}
+					}
+
+					uiHoveredAny = hoveredAny;
+					uiHoveredHandle = hoveredHandle;
+
+					if (hoveredHandle != -1 && !uiDragging) {
+						ImGui::SetMouseCursor(handles[hoveredHandle].cursor);
+						if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+							uiDragging = true;
+							uiDragHandle = hoveredHandle;
+							uiDragStartPos = selObj.rectTransforms[0].pos;
+							uiDragStartSize = selObj.rectTransforms[0].size;
+							if (hasButton) {
+								uiDragStartHitOffset = selObj.buttons[0].hitboxOffset;
+								uiDragStartHitScale = selObj.buttons[0].hitboxScale;
+							}
+							gizmoDragStartMouse = ImGui::GetMousePos();
+						}
+					}
+
+					if (uiDragging) {
+						ImGui::SetMouseCursor(handles[uiDragHandle].cursor);
+						float adx = (mousePos.x - gizmoDragStartMouse.x) / scaleX;
+						float ady = (mousePos.y - gizmoDragStartMouse.y) / scaleY;
+
+						if (handles[uiDragHandle].type == 0) {
+							auto& rt = selObj.rectTransforms[0];
+							if (uiDragHandle == 8) {
+								rt.pos.x = uiDragStartPos.x + adx;
+								rt.pos.y = uiDragStartPos.y + ady;
+							} else {
+								float nX = uiDragStartPos.x, nY = uiDragStartPos.y, nW = uiDragStartSize.x, nH = uiDragStartSize.y;
+								if (uiDragHandle == 0 || uiDragHandle == 6 || uiDragHandle == 7) { nX += adx; nW -= adx; }
+								if (uiDragHandle == 2 || uiDragHandle == 3 || uiDragHandle == 4) { nW += adx; }
+								if (uiDragHandle == 0 || uiDragHandle == 1 || uiDragHandle == 2) { nY += ady; nH -= ady; }
+								if (uiDragHandle == 4 || uiDragHandle == 5 || uiDragHandle == 6) { nH += ady; }
+								if (nW < 5.0f) { if (uiDragHandle == 0 || uiDragHandle == 6 || uiDragHandle == 7) nX -= (5.0f - nW); nW = 5.0f; }
+								if (nH < 5.0f) { if (uiDragHandle == 0 || uiDragHandle == 1 || uiDragHandle == 2) nY -= (5.0f - nH); nH = 5.0f; }
+								rt.pos = {nX, nY}; rt.size = {nW, nH};
+							}
+						} else if (hasButton) {
+							auto& btn = selObj.buttons[0];
+							int hIdx = uiDragHandle - 9;
+							if (hIdx == 8) {
+								btn.hitboxOffset.x = uiDragStartHitOffset.x + adx;
+								btn.hitboxOffset.y = uiDragStartHitOffset.y + ady;
+							} else {
+								float curW = uiDragStartSize.x * uiDragStartHitScale.x, curH = uiDragStartSize.y * uiDragStartHitScale.y;
+								float curOffX = uiDragStartHitOffset.x, curOffY = uiDragStartHitOffset.y;
+								if (hIdx == 0 || hIdx == 6 || hIdx == 7) { curOffX += adx * 0.5f; curW -= adx; }
+								if (hIdx == 2 || hIdx == 3 || hIdx == 4) { curOffX += adx * 0.5f; curW += adx; }
+								if (hIdx == 0 || hIdx == 1 || hIdx == 2) { curOffY += ady * 0.5f; curH -= ady; }
+								if (hIdx == 4 || hIdx == 5 || hIdx == 6) { curOffY += ady * 0.5f; curH += ady; }
+								if (curW < 5.0f) curW = 5.0f; if (curH < 5.0f) curH = 5.0f;
+								btn.hitboxScale = {curW / uiDragStartSize.x, curH / uiDragStartSize.y};
+								btn.hitboxOffset = {curOffX, curOffY};
+							}
+						}
+
+						if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+							int objIdx = gameScene->selectedObjectIndex_;
+							if (handles[uiDragHandle].type == 0) {
+								auto sP = uiDragStartPos, sS = uiDragStartSize;
+								auto eP = selObj.rectTransforms[0].pos, eS = selObj.rectTransforms[0].size;
+								PushUndo({"UI Rect Edit", [gameScene, objIdx, sP, sS]() {
+									if (objIdx >= 0 && objIdx < (int)gameScene->objects_.size() && !gameScene->objects_[objIdx].rectTransforms.empty()) {
+										gameScene->objects_[objIdx].rectTransforms[0].pos = sP; gameScene->objects_[objIdx].rectTransforms[0].size = sS;
+									}
+								}, [gameScene, objIdx, eP, eS]() {
+									if (objIdx >= 0 && objIdx < (int)gameScene->objects_.size() && !gameScene->objects_[objIdx].rectTransforms.empty()) {
+										gameScene->objects_[objIdx].rectTransforms[0].pos = eP; gameScene->objects_[objIdx].rectTransforms[0].size = eS;
+									}
+								}});
+							} else if (hasButton) {
+								auto sO = uiDragStartHitOffset, sS = uiDragStartHitScale;
+								auto eO = selObj.buttons[0].hitboxOffset, eS = selObj.buttons[0].hitboxScale;
+								PushUndo({"UI Hitbox Edit", [gameScene, objIdx, sO, sS]() {
+									if (objIdx >= 0 && objIdx < (int)gameScene->objects_.size() && !gameScene->objects_[objIdx].buttons.empty()) {
+										gameScene->objects_[objIdx].buttons[0].hitboxOffset = sO; gameScene->objects_[objIdx].buttons[0].hitboxScale = sS;
+									}
+								}, [gameScene, objIdx, eO, eS]() {
+									if (objIdx >= 0 && objIdx < (int)gameScene->objects_.size() && !gameScene->objects_[objIdx].buttons.empty()) {
+										gameScene->objects_[objIdx].buttons[0].hitboxOffset = eO; gameScene->objects_[objIdx].buttons[0].hitboxScale = eS;
+									}
+								}});
+							}
+							uiDragging = false; uiDragHandle = -1;
+						}
+					}
 
 					for (int i = 0; i < (int)handles.size(); ++i) {
-						if (mpos.x >= handles[i].x - hitDetectRad && mpos.x <= handles[i].x + hitDetectRad && mpos.y >= handles[i].y - hitDetectRad && mpos.y <= handles[i].y + hitDetectRad) {
-							hoveredHandle = i;
-							hoveredAny = true;
-							break;
-						}
+						if (i == 8 || i == 17) continue;
+						ImU32 col = (hoveredHandle == i || uiDragHandle == i) ? colHandleHover : (handles[i].type == 0 ? colHandle : colHitHandle);
+						dl->AddRectFilled(ImVec2(handles[i].x - handleSz, handles[i].y - handleSz), ImVec2(handles[i].x + handleSz, handles[i].y + handleSz), col);
 					}
-
-					// ベゼル（枠線）判定
-					if (hoveredHandle == -1) {
-						// Visual Bezel
-						bool onLeft = std::abs(mpos.x - cx) < bezelDetectWidth && mpos.y >= cy && mpos.y <= cy + ch;
-						bool onRight = std::abs(mpos.x - (cx + cw)) < bezelDetectWidth && mpos.y >= cy && mpos.y <= cy + ch;
-						bool onTop = std::abs(mpos.y - cy) < bezelDetectWidth && mpos.x >= cx && mpos.x <= cx + cw;
-						bool onBottom = std::abs(mpos.y - (cy + ch)) < bezelDetectWidth && mpos.x >= cx && mpos.x <= cx + cw;
-
-						if (onLeft && onTop) hoveredHandle = 0;
-						else if (onRight && onTop) hoveredHandle = 2;
-						else if (onRight && onBottom) hoveredHandle = 4;
-						else if (onLeft && onBottom) hoveredHandle = 6;
-						else if (onTop) hoveredHandle = 1;
-						else if (onRight) hoveredHandle = 3;
-						else if (onBottom) hoveredHandle = 5;
-						else if (onLeft) hoveredHandle = 7;
-
-						if (hoveredHandle == -1 && hasButton) {
-							// Hitbox Bezel
-							bool hOnLeft = std::abs(mpos.x - hbxX) < bezelDetectWidth && mpos.y >= hbxY && mpos.y <= hbxY + hbxH;
-							bool hOnRight = std::abs(mpos.x - (hbxX + hbxW)) < bezelDetectWidth && mpos.y >= hbxY && mpos.y <= hbxY + hbxH;
-							bool hOnTop = std::abs(mpos.y - hbxY) < bezelDetectWidth && mpos.x >= hbxX && mpos.x <= hbxX + hbxW;
-							bool hOnBottom = std::abs(mpos.y - (hbxY + hbxH)) < bezelDetectWidth && mpos.x >= hbxX && mpos.x <= hbxX + hbxW;
-
-							if (hOnLeft && hOnTop) hoveredHandle = 9;
-							else if (hOnRight && hOnTop) hoveredHandle = 11;
-							else if (hOnRight && hOnBottom) hoveredHandle = 13;
-							else if (hOnLeft && hOnBottom) hoveredHandle = 15;
-							else if (hOnTop) hoveredHandle = 10;
-							else if (hOnRight) hoveredHandle = 12;
-							else if (hOnBottom) hoveredHandle = 14;
-							else if (hOnLeft) hoveredHandle = 16;
-						}
-
-						if (hoveredHandle != -1) hoveredAny = true;
-					}
-
-					// Center drag
-					if (hoveredHandle == -1) {
-						if (hasButton && mpos.x >= hbxX && mpos.x <= hbxX + hbxW && mpos.y >= hbxY && mpos.y <= hbxY + hbxH) {
-							hoveredHandle = 17; // Hitbox Move
-							hoveredAny = true;
-						} else if (mpos.x >= cx && mpos.x <= cx + cw && mpos.y >= cy && mpos.y <= cy + ch) {
-							hoveredHandle = 8; // Visual Move
-							hoveredAny = true;
-						}
-					}
-				}
-
-				uiHoveredAny = hoveredAny;
-				uiHoveredHandle = hoveredHandle;
-
-				if (hoveredHandle != -1 && !uiDragging) {
-					ImGui::SetMouseCursor(handles[hoveredHandle].cursor);
-					if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-						uiDragging = true;
-						uiDragHandle = hoveredHandle;
-						uiDragStartPos = selObj.rectTransforms[0].pos;
-						uiDragStartSize = selObj.rectTransforms[0].size;
-						if (hasButton) {
-							uiDragStartHitOffset = selObj.buttons[0].hitboxOffset;
-							uiDragStartHitScale = selObj.buttons[0].hitboxScale;
-						}
-						gizmoDragStartMouse = ImGui::GetMousePos();
-					}
-				}
-
-				if (uiDragging) {
-					ImGui::SetMouseCursor(handles[uiDragHandle].cursor);
-					ImVec2 mpos = ImGui::GetMousePos();
-					float adx = (mpos.x - gizmoDragStartMouse.x) / scaleX; // バックバッファ座標系での移動量
-					float ady = (mpos.y - gizmoDragStartMouse.y) / scaleY;
-
-					auto& rt = selObj.rectTransforms[0];
-					if (handles[uiDragHandle].type == 0) { // Visual Edit
-						if (uiDragHandle == 8) {           // Move
-							rt.pos.x = uiDragStartPos.x + adx;
-							rt.pos.y = uiDragStartPos.y + ady;
-						} else { // Resize
-							float nX = uiDragStartPos.x, nY = uiDragStartPos.y, nW = uiDragStartSize.x, nH = uiDragStartSize.y;
-							if (uiDragHandle == 0 || uiDragHandle == 6 || uiDragHandle == 7) {
-								nX += adx;
-								nW -= adx;
-							}
-							if (uiDragHandle == 2 || uiDragHandle == 3 || uiDragHandle == 4) {
-								nW += adx;
-							}
-							if (uiDragHandle == 0 || uiDragHandle == 1 || uiDragHandle == 2) {
-								nY += ady;
-								nH -= ady;
-							}
-							if (uiDragHandle == 4 || uiDragHandle == 5 || uiDragHandle == 6) {
-								nH += ady;
-							}
-							if (nW < 5.0f) {
-								if (uiDragHandle == 0 || uiDragHandle == 6 || uiDragHandle == 7)
-									nX -= (5.0f - nW);
-								nW = 5.0f;
-							}
-							if (nH < 5.0f) {
-								if (uiDragHandle == 0 || uiDragHandle == 1 || uiDragHandle == 2)
-									nY -= (5.0f - nH);
-								nH = 5.0f;
-							}
-							rt.pos = {nX, nY};
-							rt.size = {nW, nH};
-						}
-					} else if (hasButton) { // Hitbox Edit (Handle index 9-17)
-						auto& btn = selObj.buttons[0];
-						int hIdx = uiDragHandle - 9;
-						if (hIdx == 8) { // Center Move
-							btn.hitboxOffset.x = uiDragStartHitOffset.x + adx;
-							btn.hitboxOffset.y = uiDragStartHitOffset.y + ady;
-						} else { // Resize
-							float curW = uiDragStartSize.x * uiDragStartHitScale.x;
-							float curH = uiDragStartSize.y * uiDragStartHitScale.y;
-							float curOffX = uiDragStartHitOffset.x;
-							float curOffY = uiDragStartHitOffset.y;
-
-							if (hIdx == 0 || hIdx == 6 || hIdx == 7) {
-								curOffX += adx * 0.5f;
-								curW -= adx;
-							}
-							if (hIdx == 2 || hIdx == 3 || hIdx == 4) {
-								curOffX += adx * 0.5f;
-								curW += adx;
-							}
-							if (hIdx == 0 || hIdx == 1 || hIdx == 2) {
-								curOffY += ady * 0.5f;
-								curH -= ady;
-							}
-							if (hIdx == 4 || hIdx == 5 || hIdx == 6) {
-								curOffY += ady * 0.5f;
-								curH += ady;
-							}
-
-							if (curW < 5.0f)
-								curW = 5.0f;
-							if (curH < 5.0f)
-								curH = 5.0f;
-							btn.hitboxScale = {curW / uiDragStartSize.x, curH / uiDragStartSize.y};
-							btn.hitboxOffset = {curOffX, curOffY};
-						}
-					}
-
-					if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-						int idx = gameScene->selectedObjectIndex_;
-						if (handles[uiDragHandle].type == 0) {
-							auto sP = uiDragStartPos, sS = uiDragStartSize;
-							auto eP = rt.pos, eS = rt.size;
-							PushUndo(
-							    {"UI Rect Edit",
-							     [gameScene, idx, sP, sS]() {
-								     if (idx < (int)gameScene->objects_.size() && !gameScene->objects_[idx].rectTransforms.empty()) {
-									     gameScene->objects_[idx].rectTransforms[0].pos = sP;
-									     gameScene->objects_[idx].rectTransforms[0].size = sS;
-								     }
-							     },
-							     [gameScene, idx, eP, eS]() {
-								     if (idx < (int)gameScene->objects_.size() && !gameScene->objects_[idx].rectTransforms.empty()) {
-									     gameScene->objects_[idx].rectTransforms[0].pos = eP;
-									     gameScene->objects_[idx].rectTransforms[0].size = eS;
-								     }
-							     }});
-						} else if (hasButton) {
-							auto sO = uiDragStartHitOffset, sS = uiDragStartHitScale;
-							auto eO = selObj.buttons[0].hitboxOffset, eS = selObj.buttons[0].hitboxScale;
-							PushUndo(
-							    {"UI Hitbox Edit",
-							     [gameScene, idx, sO, sS]() {
-								     if (idx < (int)gameScene->objects_.size() && !gameScene->objects_[idx].buttons.empty()) {
-									     gameScene->objects_[idx].buttons[0].hitboxOffset = sO;
-									     gameScene->objects_[idx].buttons[0].hitboxScale = sS;
-								     }
-							     },
-							     [gameScene, idx, eO, eS]() {
-								     if (idx < (int)gameScene->objects_.size() && !gameScene->objects_[idx].buttons.empty()) {
-									     gameScene->objects_[idx].buttons[0].hitboxOffset = eO;
-									     gameScene->objects_[idx].buttons[0].hitboxScale = eS;
-								     }
-							     }});
-						}
-						uiDragging = false;
-						uiDragHandle = -1;
-					}
-				}
-
-				// ハンドル描画
-				for (int i = 0; i < (int)handles.size(); ++i) {
-					if (i == 8 || i == 17)
-						continue; // Center handles are invisible
-					ImU32 col = (hoveredHandle == i || uiDragHandle == i) ? colHandleHover : (handles[i].type == 0 ? colHandle : colHitHandle);
-					dl->AddRectFilled(ImVec2(handles[i].x - handleSz, handles[i].y - handleSz), ImVec2(handles[i].x + handleSz, handles[i].y + handleSz), col);
 				}
 			}
-		}
 
-		// ドラッグがウィンドウ外に行った場合のリセット
-		if ((gizmoDragging || objectDragging || uiDragging) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-			gizmoDragging = false;
-			gizmoDragAxis = -1;
-			objectDragging = false;
-			uiDragging = false;
+			if ((gizmoDragging || objectDragging || uiDragging) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+				gizmoDragging = false; gizmoDragAxis = -1; objectDragging = false; uiDragging = false;
+			}
+			if (gameScene && tH > 0.0f)
+				gameScene->camera_.SetProjection(DirectX::XMConvertToRadians(45.0f), tW / tH, 0.1f, 1000.0f);
+			if (gameScene && tW > 0.0f && tH > 0.0f) {
+				float scaleX = (float)Engine::WindowDX::kW / tW;
+				float scaleY = (float)Engine::WindowDX::kH / tH;
+				gameScene->ctx_.useOverrideMouse = true;
+				gameScene->ctx_.overrideMouseX = (mousePos.x - gameImageMin.x) * scaleX;
+				gameScene->ctx_.overrideMouseY = (mousePos.y - gameImageMin.y) * scaleY;
+			}
 		}
-
-		if (gameScene && tH > 0.0f)
-			gameScene->camera_.SetProjection(DirectX::XMConvertToRadians(45.0f), tW / tH, 0.1f, 1000.0f);
-
-		// EditorUI内でGameScene::Draw()を呼ぶ際に、
-		// 該当する範囲（ゲームビュー）の座標系にマウス位置を変換してUIに渡す
-		if (gameScene && tW > 0.0f && tH > 0.0f) {
-			float scaleX = (float)Engine::WindowDX::kW / tW;
-			float scaleY = (float)Engine::WindowDX::kH / tH;
-			gameScene->ctx_.useOverrideMouse = true;
-			gameScene->ctx_.overrideMouseX = (mousePos.x - gameImageMin.x) * scaleX;
-			gameScene->ctx_.overrideMouseY = (mousePos.y - gameImageMin.y) * scaleY;
-		}
-	} // ★ 修正: if (gameScene && gameHovered && tW > 0 && tH > 0) の終了 (IsPlaying除外)
 
 	ImGui::End();
 	ImGui::PopStyleVar();
-
 	ImGui::End(); // DockSpace
 }
 
@@ -4218,5 +4004,11 @@ void EditorUI::ShowConsole() {
 	ImGui::EndChild();
 	ImGui::End();
 }
+#endif // USE_IMGUI
+
+#ifndef USE_IMGUI
+	// Level 1 stubs for Release
+	void EditorUI::Show(Engine::Renderer*, GameScene*) {}
+#endif
 
 } // namespace Game

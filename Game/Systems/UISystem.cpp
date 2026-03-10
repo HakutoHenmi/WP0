@@ -55,6 +55,8 @@ UISystem::WorldRect UISystem::CalculateWorldRect(const SceneObject& obj, const s
 }
 
 void UISystem::Draw(std::vector<SceneObject>& objects, GameContext& ctx) {
+    if (!ctx.renderer) return;
+
     std::unordered_map<uint32_t, WorldRect> cache;
 
     auto renderRecursive = [&](auto self, uint32_t parentId, WorldRect parentRect) -> void {
@@ -131,6 +133,7 @@ void UISystem::RenderNodeWithRect(SceneObject& obj, const WorldRect& wr, GameCon
 }
 
 void UISystem::DrawText(const SceneObject& /*obj*/, const UITextComponent& text, float worldX, float worldY, float worldW, float worldH, Engine::Renderer* /*renderer*/) {
+#ifdef USE_IMGUI
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
     if (!drawList) return;
 
@@ -142,6 +145,9 @@ void UISystem::DrawText(const SceneObject& /*obj*/, const UITextComponent& text,
 
     ImU32 color = ImGui::GetColorU32(ImVec4(text.color.x, text.color.y, text.color.z, text.color.w));
     drawList->AddText(ImGui::GetFont(), text.fontSize, pos, color, text.text.c_str());
+#else
+    (void)text; (void)worldX; (void)worldY; (void)worldW; (void)worldH;
+#endif
 }
 
 void UISystem::ProcessButton(SceneObject& obj, UIButtonComponent& btn, float worldX, float worldY, float worldW, float worldH, GameContext& ctx) {
