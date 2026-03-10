@@ -22,30 +22,26 @@ TextureManager& TextureManager::Instance() {
 	return inst;
 }
 
-void TextureManager::Initialize(WindowDX* dx, Renderer* renderer) {
-	dx_ = dx;
+void TextureManager::Initialize(Renderer* renderer) {
 	renderer_ = renderer; // 互換のため保持
 	pathToIndex_.clear();
 	textures_.clear();
-	srvCursor_ = 10;
 }
 
 void TextureManager::Shutdown() {
 	// GPU参照中に解放しない
-	if (dx_)
-		dx_->WaitIdle();
+	if (renderer_ && renderer_->GetWindow())
+		renderer_->GetWindow()->WaitIdle();
 
 	textures_.clear();
 	pathToIndex_.clear();
-	dx_ = nullptr;
 	renderer_ = nullptr;
-	srvCursor_ = 10;
 }
 
 TextureHandle TextureManager::Load(const std::wstring& relPath) {
 	TextureHandle handle;
 
-	if (!dx_)
+	if (!renderer_)
 		return handle;
 
 	// 既に読み込み済みならそれを返す
@@ -67,7 +63,7 @@ TextureHandle TextureManager::Load(const std::wstring& relPath) {
 
 	const auto& meta = img.GetMetadata();
 
-	ID3D12Device* dev = dx_->Dev();
+	ID3D12Device* dev = SrvManager::GetInstance()->GetDevice();
 	if (!dev)
 		return handle;
 
@@ -101,7 +97,7 @@ TextureHandle TextureManager::Load(const std::wstring& relPath) {
 	sd.SlicePitch = (LONG_PTR)image0->slicePitch;
 
 	// コマンドリストへコピーを積む（呼び出し側が BeginFrame〜EndFrame の中で呼ぶ前提）
-	ID3D12GraphicsCommandList* cmd = dx_->List();
+	ID3D12GraphicsCommandList* cmd = renderer_->GetCommandList();
 	if (!cmd)
 		return handle;
 
@@ -144,9 +140,8 @@ D3D12_CPU_DESCRIPTOR_HANDLE TextureManager::GetCPU(const TextureHandle& h) const
 	D3D12_CPU_DESCRIPTOR_HANDLE dummy{};
 	if (!IsValid(h))
 		return dummy;
-	if (!dx_)
-		return dummy;
-	return dx_->SRV_CPU(textures_[h.index].srvIndex);
+	
+	return SrvManager::GetInstance()->GetCPUDescriptorHandle(textures_[h.index].srvIndex);
 }
 
 } // namespace Engine

@@ -1825,12 +1825,8 @@ Renderer::TextureHandle Renderer::LoadTexture2D(const std::string& filePath, boo
 	const uint32_t idx = AllocateSrvIndex();
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu = SrvManager::GetInstance()->GetCPUDescriptorHandle(idx);
 	D3D12_GPU_DESCRIPTOR_HANDLE gpu = SrvManager::GetInstance()->GetGPUDescriptorHandle(idx);
-	D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-	srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	srv.Format = fmt;
-	srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-	srv.Texture2D.MipLevels = 1;
-	dev_->CreateShaderResourceView(tex.Get(), &srv, cpu);
+	
+	SrvManager::GetInstance()->CreateSRVForTexture2D(idx, tex.Get(), fmt, 1);
 
 	Texture t{};
 	t.res = tex;
